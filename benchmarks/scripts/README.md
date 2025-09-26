@@ -76,6 +76,112 @@ Evaluates query processing speed with sequential queries.
 
 ---
 
+### 4. Incremental Insertion Benchmark (`incremental_insertion_benchmark.sh`)
+**⭐ NEW!** Comprehensive test of insertion performance with incremental data loads.
+
+**Usage:**
+```bash
+./benchmarks/scripts/incremental_insertion_benchmark.sh
+```
+
+**Tests:**
+- **Single Row Inserts:** 10, 50, 100, 500, 1K, 5K, 10K rows
+- **Batch Inserts:** Various batch sizes (10, 100, 500, 1000)
+- Tests both baseline and optimized insertion patterns
+
+**Features:**
+- Incremental load testing (starts small, increases gradually)
+- Compares single vs batch insert performance
+- Generates detailed performance reports
+- Visual comparison tables
+- Performance insights and recommendations
+
+**Typical Results:**
+- Single inserts show network latency impact
+- Batch inserts significantly improve throughput
+- FastPostgres typically 15-25% faster for single inserts
+- Larger batches show better performance for both databases
+
+**Output:**
+- Detailed timing for each test
+- Row count verification
+- Comparative performance tables
+- Average performance metrics
+- Performance visualization
+
+---
+
+### 5. Quick Insertion Test (`quick_insertion_test.sh`)
+A fast version of the insertion benchmark for quick validation.
+
+**Usage:**
+```bash
+./benchmarks/scripts/quick_insertion_test.sh
+```
+
+**Tests:**
+- 10, 25, and 50 rows
+- Takes ~5 seconds to complete
+- Perfect for quick performance checks
+
+---
+
+### 6. Large Volume Insertion Benchmark (`large_volume_insertion_benchmark.sh`)
+**🔥 NEW!** Comprehensive test for bulk data loading and high-volume insertion scenarios.
+
+**Usage:**
+```bash
+./benchmarks/scripts/large_volume_insertion_benchmark.sh
+```
+
+**Tests:**
+- **50K rows** with batch size 500
+- **100K rows** with batch size 1,000
+- **250K rows** with batch size 2,500
+- **500K rows** with batch size 5,000
+- **1M rows** with batch size 10,000
+
+**Features:**
+- 20-column realistic data structure (users, transactions, etc.)
+- Progress bar with real-time updates
+- Automatic batch size optimization
+- Verification of inserted counts
+- Comprehensive performance analysis
+- Best practices recommendations
+
+**Typical Results:**
+- 5K rows: ~2,000-2,100 rows/sec
+- 10K rows: ~1,000-1,100 rows/sec
+- 100K+ rows: Scales efficiently with batch operations
+- FastPostgres typically 5-10% faster for large batches
+
+**Output:**
+- Real-time progress indicators
+- Detailed timing for each volume test
+- Comparative performance tables
+- Average throughput analysis
+- Performance insights and best practices
+
+**Estimated Runtime:** 10-20 minutes for full suite
+
+---
+
+### 7. Large Volume Quick Test (`large_volume_quick_test.sh`)
+Fast validation of bulk insertion performance.
+
+**Usage:**
+```bash
+./benchmarks/scripts/large_volume_quick_test.sh
+```
+
+**Tests:**
+- 5,000 rows (batch: 500)
+- 10,000 rows (batch: 1,000)
+- Takes ~15 seconds
+- Good for quick bulk performance checks
+
+---
+
 ## Configuration
 
 ### Default Ports

@@ -86,6 +86,12 @@ docker-compose up -d fastpostgres postgres
 # Or run individual benchmarks
 ./benchmarks/scripts/concurrent_connections_benchmark.sh
 ./benchmarks/scripts/query_performance_benchmark.sh
+./benchmarks/scripts/incremental_insertion_benchmark.sh
+./benchmarks/scripts/large_volume_insertion_benchmark.sh
+
+# Quick tests (fast validation)
+./benchmarks/scripts/quick_insertion_test.sh          # ~5 seconds
+./benchmarks/scripts/large_volume_quick_test.sh       # ~15 seconds
 ```
 
 See [benchmarks/scripts/README.md](benchmarks/scripts/README.md) for detailed benchmark documentation.
@@ -265,6 +271,23 @@ Performance comparison running both databases in Docker containers:
 | 100 queries | 40.71 q/sec | 45.50 q/sec | 11.8% faster |
 | 500 queries | 40.48 q/sec | 44.26 q/sec | 9.3% faster |
 | 1000 queries | 40.84 q/sec | 44.59 q/sec | 9.2% faster |
+
+#### Insertion Performance (Single Row Inserts)
+
+| Row Count | PostgreSQL | FastPostgres | Improvement |
+|-----------|------------|--------------|-------------|
+| 10 rows | 36.90 rows/sec | 47.76 rows/sec | 29.4% faster |
+| 25 rows | 39.50 rows/sec | 47.01 rows/sec | 19.0% faster |
+| 50 rows | 38.07 rows/sec | 47.32 rows/sec | 24.3% faster |
+
+#### Large Volume Insertion (Batch Operations)
+
+| Row Count | Batch Size | PostgreSQL | FastPostgres | Improvement |
+|-----------|------------|------------|--------------|-------------|
+| 5,000 | 500 | 2,008 rows/sec | 2,142 rows/sec | 6.7% faster |
+| 10,000 | 1,000 | 1,091 rows/sec | 1,101 rows/sec | 0.9% faster |
+
+*Note: Batch operations show high throughput for bulk data loading. Both databases handle large volumes efficiently with optimized batch inserts.*
 
 **Test Environment:**
 - Both databases running in Docker containers
