@@ -5,9 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"time"
+
+	"fastpostgres/pkg/engine"
+	"fastpostgres/pkg/query"
 )
 
 // PostgreSQL Wire Protocol Implementation
@@ -66,7 +70,7 @@ const (
 // PostgreSQL connection state
 type PGConnection struct {
 	conn         net.Conn
-	database     *Database
+	database     *engine.Database
 	authenticated bool
 	transactionStatus byte
 	parameters   map[string]string
@@ -76,19 +80,25 @@ type PGConnection struct {
 
 // PostgreSQL protocol handler
 type PGProtocolHandler struct {
-	database *Database
+	database *engine.Database
+	parser   *query.SQLParser
+	qEngine  *query.VectorizedEngine
 	processCounter int32
 }
 
-func NewPGProtocolHandler(database *Database) *PGProtocolHandler {
+func NewPGProtocolHandler(database *engine.Database) *PGProtocolHandler {
 	return &PGProtocolHandler{
 		database: database,
+		parser:   query.NewSQLParser(),
+		qEngine:  query.NewVectorizedEngine(),
 		processCounter: 1000,
 	}
 }
 
 func (h *PGProtocolHandler) HandleConnection(conn net.Conn) error {
 	defer conn.Close()
+
+	log.Printf("New connection from %s", conn.RemoteAddr())
 
 	pgConn := &PGConnection{
 		conn:              conn,
@@ -135,12 +145,15 @@ func (h *PGProtocolHandler) HandleConnection(conn net.Conn) error {
 }
 
 func (h *PGProtocolHandler) handleStartupMessage(pgConn *PGConnection) error {
+	log.Printf("handleStartupMessage: reading startup message")
 	// Read startup message (no message type byte, just length)
 	var msgLen int32
 	err := binary.Read(pgConn.conn, binary.BigEndian, &msgLen)
 	if err != nil {
+		log.Printf("handleStartupMessage: failed to read message length: %v", err)
 		return err
 	}
+	log.Printf("handleStartupMessage: message length = %d", msgLen)
 
 	if msgLen < 8 || msgLen > 10000 {
 		return fmt.Errorf("invalid startup message length: %d", msgLen)
@@ -164,8 +177,13 @@ func (h *PGProtocolHandler) handleStartupMessage(pgConn *PGConnection) error {
 
 	// Check for SSL request (special case)
 	if version == 80877103 {
+		log.Printf("SSL request received, sending SSL not supported response")
 		// SSL not supported, send 'N'
-		pgConn.conn.Write([]byte{'N'})
+		_, err := pgConn.conn.Write([]byte{'N'})
+		if err != nil {
+			return fmt.Errorf("failed to send SSL response: %v", err)
+		}
+		log.Printf("SSL response sent, waiting for actual startup message")
 		return h.handleStartupMessage(pgConn) // Read actual startup message
 	}
 
@@ -351,35 +369,90 @@ func (h *PGProtocolHandler) executeSimpleQuery(pgConn *PGConnection, sql string)
 }
 
 func (h *PGProtocolHandler) handleSelect(pgConn *PGConnection, sql string) error {
-	// Simple SELECT implementation
-	// For demo, return a hardcoded result
+	log.Printf("Executing SELECT: %s", sql)
+
+	// Handle special PostgreSQL queries first
+	if h.handleSpecialSelect(pgConn, sql) {
+		return nil
+	}
+
+	// Parse the SQL query
+	plan, err := h.parser.Parse(sql)
+	if err != nil {
+		log.Printf("Parse error: %v", err)
+		return h.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("Parse error: %v", err))
+	}
+
+	// Get the table
+	tableInterface, exists := h.database.Tables.Load(plan.TableName)
+	if !exists {
+		log.Printf("Table not found: %s", plan.TableName)
+		return h.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("Table '%s' does not exist", plan.TableName))
+	}
+
+	table := tableInterface.(*engine.Table)
+
+	// Execute the query
+	result, err := h.qEngine.ExecuteSelect(plan, table)
+	if err != nil {
+		log.Printf("Execution error: %v", err)
+		return h.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("Execution error: %v", err))
+	}
 
 	// Send row description
-	err := h.sendRowDescription(pgConn, []ColumnInfo{
-		{Name: "id", DataType: "int4", TypeSize: 4},
-		{Name: "name", DataType: "varchar", TypeSize: -1},
-		{Name: "created", DataType: "timestamp", TypeSize: 8},
-	})
+	columns := make([]ColumnInfo, len(result.Columns))
+	for i, colName := range result.Columns {
+		dataType := "text"
+		typeSize := int32(-1)
+
+		if i < len(result.Types) {
+			switch result.Types[i] {
+			case engine.TypeInt32:
+				dataType = "int4"
+				typeSize = 4
+			case engine.TypeInt64:
+				dataType = "int8"
+				typeSize = 8
+			case engine.TypeString:
+				dataType = "text"
+				typeSize = -1
+			case engine.TypeFloat64:
+				dataType = "float8"
+				typeSize = 8
+			}
+		}
+
+		columns[i] = ColumnInfo{
+			Name:     colName,
+			DataType: dataType,
+			TypeSize: typeSize,
+		}
+	}
+
+	err = h.sendRowDescription(pgConn, columns)
 	if err != nil {
 		return err
 	}
 
-	// Send sample data rows
-	rows := [][]string{
-		{"1", "Alice", "2024-01-01 10:00:00"},
-		{"2", "Bob", "2024-01-02 11:00:00"},
-		{"3", "Charlie", "2024-01-03 12:00:00"},
-	}
+	// Send data rows
+	for _, row := range result.Rows {
+		stringRow := make([]string, len(row))
+		for i, value := range row {
+			if value == nil {
+				stringRow[i] = ""
+			} else {
+				stringRow[i] = fmt.Sprintf("%v", value)
+			}
+		}
 
-	for _, row := range rows {
-		err = h.sendDataRow(pgConn, row)
+		err = h.sendDataRow(pgConn, stringRow)
 		if err != nil {
 			return err
 		}
 	}
 
 	// Send command complete
-	err = h.sendCommandComplete(pgConn, "SELECT", len(rows))
+	err = h.sendCommandComplete(pgConn, "SELECT", len(result.Rows))
 	if err != nil {
 		return err
 	}
@@ -387,9 +460,65 @@ func (h *PGProtocolHandler) handleSelect(pgConn *PGConnection, sql string) error
 	return h.sendReadyForQuery(pgConn, pgConn.transactionStatus)
 }
 
+func (h *PGProtocolHandler) handleSpecialSelect(pgConn *PGConnection, sql string) bool {
+	sqlUpper := strings.ToUpper(strings.TrimSpace(sql))
+
+	switch {
+	case strings.Contains(sqlUpper, "VERSION()"):
+		return h.sendVersionResult(pgConn)
+	case strings.Contains(sqlUpper, "CURRENT_DATABASE()"):
+		return h.sendCurrentDatabaseResult(pgConn)
+	case strings.Contains(sqlUpper, "PG_CATALOG") || strings.Contains(sqlUpper, "INFORMATION_SCHEMA"):
+		return h.sendEmptyResult(pgConn, "SELECT")
+	case sqlUpper == "SELECT 1":
+		return h.sendSelectOneResult(pgConn)
+	}
+
+	return false
+}
+
+func (h *PGProtocolHandler) sendVersionResult(pgConn *PGConnection) bool {
+	h.sendRowDescription(pgConn, []ColumnInfo{
+		{Name: "version", DataType: "text", TypeSize: -1},
+	})
+	h.sendDataRow(pgConn, []string{"FastPostgres 1.0.0 on Go, PostgreSQL 13.0 compatible"})
+	h.sendCommandComplete(pgConn, "SELECT", 1)
+	h.sendReadyForQuery(pgConn, pgConn.transactionStatus)
+	return true
+}
+
+func (h *PGProtocolHandler) sendCurrentDatabaseResult(pgConn *PGConnection) bool {
+	h.sendRowDescription(pgConn, []ColumnInfo{
+		{Name: "current_database", DataType: "text", TypeSize: -1},
+	})
+	h.sendDataRow(pgConn, []string{"fastpostgres"})
+	h.sendCommandComplete(pgConn, "SELECT", 1)
+	h.sendReadyForQuery(pgConn, pgConn.transactionStatus)
+	return true
+}
+
+func (h *PGProtocolHandler) sendSelectOneResult(pgConn *PGConnection) bool {
+	h.sendRowDescription(pgConn, []ColumnInfo{
+		{Name: "?column?", DataType: "int4", TypeSize: 4},
+	})
+	h.sendDataRow(pgConn, []string{"1"})
+	h.sendCommandComplete(pgConn, "SELECT", 1)
+	h.sendReadyForQuery(pgConn, pgConn.transactionStatus)
+	return true
+}
+
+func (h *PGProtocolHandler) sendEmptyResult(pgConn *PGConnection, command string) bool {
+	h.sendCommandComplete(pgConn, command, 0)
+	h.sendReadyForQuery(pgConn, pgConn.transactionStatus)
+	return true
+}
+
 func (h *PGProtocolHandler) handleInsert(pgConn *PGConnection, sql string) error {
-	// Simple INSERT acknowledgment
-	err := h.sendCommandComplete(pgConn, "INSERT", 1)
+	log.Printf("Executing INSERT: %s", sql)
+
+	// For now, just acknowledge INSERT commands
+	// In a full implementation, this would parse and execute the INSERT
+	err := h.sendCommandComplete(pgConn, "INSERT 0 1", 0)
 	if err != nil {
 		return err
 	}
@@ -397,7 +526,10 @@ func (h *PGProtocolHandler) handleInsert(pgConn *PGConnection, sql string) error
 }
 
 func (h *PGProtocolHandler) handleCreate(pgConn *PGConnection, sql string) error {
-	// Simple CREATE acknowledgment
+	log.Printf("Executing CREATE: %s", sql)
+
+	// For now, just acknowledge CREATE commands
+	// In a full implementation, this would actually create tables/indexes
 	if strings.Contains(strings.ToUpper(sql), "TABLE") {
 		err := h.sendCommandComplete(pgConn, "CREATE TABLE", 0)
 		if err != nil {

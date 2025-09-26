@@ -8,12 +8,14 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"fastpostgres/pkg/engine"
 )
 
 // PostgreSQL-compatible FastPostgres Server
 type PGServer struct {
 	listener           net.Listener
-	database           *Database
+	database           *engine.Database
 	protocolHandler    *PGProtocolHandler
 	activeConnections  int64
 	totalConnections   int64
@@ -25,7 +27,7 @@ type PGServer struct {
 }
 
 func NewPGServer(maxConnections int64) *PGServer {
-	database := NewDatabase("fastpostgres")
+	database := engine.NewDatabase("fastpostgres")
 
 	return &PGServer{
 		database:         database,
