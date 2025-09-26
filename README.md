@@ -14,12 +14,6 @@ A high-performance, in-memory columnar database written in Go with PostgreSQL wi
 
 ## Performance Highlights
 
-- **2.11M rows/sec** data ingestion (71x faster than PostgreSQL)
-- **23K queries/sec** concurrent query performance
-- **150K+ concurrent connections** (vs PostgreSQL's ~500 max)
-- **468K requests/sec** throughput
-- **0.55KB memory per connection** (18,000x less than PostgreSQL)
-
 ### Latest Benchmark Results (Docker)
 
 Real-world performance comparison running both databases in Docker:
