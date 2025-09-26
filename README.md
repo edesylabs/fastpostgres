@@ -170,6 +170,21 @@ go run ./benchmarks/postgres_comparison.go
 
 This is a proof-of-concept project demonstrating high-performance database techniques in Go.
 
+## Support the Project
+
+If FastPostgres has been helpful to you and you'd like to support its continued development, consider making a donation. Your contribution helps fund:
+
+- Further performance optimizations
+- Additional features and capabilities
+- Documentation improvements
+- Community support
+
+[![Donate](https://img.shields.io/badge/Donate-Razorpay-blue.svg)](https://razorpay.me/@edesytechnologylabs)
+
+**[Donate via Razorpay](https://razorpay.me/@edesytechnologylabs)**
+
+Every contribution, no matter the size, is greatly appreciated and helps make FastPostgres even better!
+
 ## License
 
 MIT License
