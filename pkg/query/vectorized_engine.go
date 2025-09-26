@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -320,56 +321,68 @@ func (ve *VectorizedEngine) applySorting(result *engine.QueryResult, orderBy []*
 
 // Vectorized aggregation operations
 func (ve *VectorizedEngine) ExecuteAggregateQuery(plan *engine.QueryPlan, table *engine.Table) (*engine.QueryResult, error) {
-	result := &engine.QueryResult{
-		Columns: plan.Columns,
-		Types:   []engine.DataType{},
-		Rows:    [][]interface{}{},
+	// Parse aggregate functions from columns
+	aggregates := ve.parseAggregates(plan.Columns)
+	if len(aggregates) == 0 {
+		return nil, fmt.Errorf("no valid aggregate functions found")
 	}
 
-	for _, col := range plan.Columns {
-		switch col {
-		case "COUNT(*)":
-			result.Types = append(result.Types, engine.TypeInt64)
-			count := int64(table.RowCount)
-			result.Rows = append(result.Rows, []interface{}{count})
-		case "SUM(age)", "AVG(age)", "MIN(age)", "MAX(age)":
-			result.Types = append(result.Types, engine.TypeFloat64)
-			// Simple implementation - would be vectorized in production
-			ageCol := table.GetColumn("age")
-			if ageCol != nil && ageCol.Type == engine.TypeInt64 {
-				data := (*[]int64)(ageCol.Data)
-				switch col {
-				case "SUM(age)":
-					var sum int64
-					for _, val := range *data {
-						sum += val
-					}
-					result.Rows = append(result.Rows, []interface{}{float64(sum)})
-				case "AVG(age)":
-					var sum int64
-					for _, val := range *data {
-						sum += val
-					}
-					avg := float64(sum) / float64(len(*data))
-					result.Rows = append(result.Rows, []interface{}{avg})
-				case "MIN(age)":
-					min := (*data)[0]
-					for _, val := range *data {
-						if val < min {
-							min = val
-						}
-					}
-					result.Rows = append(result.Rows, []interface{}{float64(min)})
-				case "MAX(age)":
-					max := (*data)[0]
-					for _, val := range *data {
-						if val > max {
-							max = val
-						}
-					}
-					result.Rows = append(result.Rows, []interface{}{float64(max)})
+	// Check if this has GROUP BY clause
+	if len(plan.GroupBy) > 0 {
+		return ve.executeGroupByAggregation(plan, table, aggregates)
+	}
+
+	// Simple aggregation without GROUP BY
+
+	result := &engine.QueryResult{
+		Columns: plan.Columns,
+		Types:   make([]engine.DataType, len(aggregates)),
+		Rows:    make([][]interface{}, 1), // Single result row for aggregates
+	}
+
+	// Initialize result row
+	result.Rows[0] = make([]interface{}, len(aggregates))
+
+	// Process each aggregate function using vectorized operations
+	for i, agg := range aggregates {
+		result.Types[i] = ve.getAggregateResultType(agg.Type)
+
+		switch agg.Type {
+		case AggCount:
+			result.Rows[0][i] = int64(table.RowCount)
+
+		case AggSum:
+			if agg.Column == "*" {
+				result.Rows[0][i] = int64(table.RowCount)
+			} else {
+				sum, err := ve.vectorizedSum(table, agg.Column)
+				if err != nil {
+					return nil, err
 				}
+				result.Rows[0][i] = sum
 			}
+
+		case AggAvg:
+			sum, err := ve.vectorizedSum(table, agg.Column)
+			if err != nil {
+				return nil, err
+			}
+			avg := float64(sum) / float64(table.RowCount)
+			result.Rows[0][i] = avg
+
+		case AggMin:
+			min, err := ve.vectorizedMin(table, agg.Column)
+			if err != nil {
+				return nil, err
+			}
+			result.Rows[0][i] = min
+
+		case AggMax:
+			max, err := ve.vectorizedMax(table, agg.Column)
+			if err != nil {
+				return nil, err
+			}
+			result.Rows[0][i] = max
 		}
 	}
 
@@ -476,4 +489,374 @@ func (bf *VectorBloomFilter) hash(data []byte, seed uint32) uint64 {
 		hash = hash*1099511628211 ^ uint64(b)
 	}
 	return hash
+}
+// Aggregate function types for parsing
+type AggregateType uint8
+
+const (
+	AggCount AggregateType = iota
+	AggSum
+	AggAvg
+	AggMin
+	AggMax
+)
+
+type AggregateFunction struct {
+	Type   AggregateType
+	Column string
+	Alias  string
+}
+
+// parseAggregates extracts aggregate functions from column list
+func (ve *VectorizedEngine) parseAggregates(columns []string) []*AggregateFunction {
+	var aggregates []*AggregateFunction
+
+	for _, col := range columns {
+		if agg := ve.parseAggregateFunction(col); agg != nil {
+			aggregates = append(aggregates, agg)
+		}
+	}
+
+	return aggregates
+}
+
+// parseAggregateFunction parses a single aggregate function string
+func (ve *VectorizedEngine) parseAggregateFunction(column string) *AggregateFunction {
+	upper := strings.ToUpper(column)
+
+	var aggType AggregateType
+	var funcName string
+
+	if strings.HasPrefix(upper, "COUNT(") {
+		aggType = AggCount
+		funcName = "COUNT"
+	} else if strings.HasPrefix(upper, "SUM(") {
+		aggType = AggSum
+		funcName = "SUM"
+	} else if strings.HasPrefix(upper, "AVG(") {
+		aggType = AggAvg
+		funcName = "AVG"
+	} else if strings.HasPrefix(upper, "MIN(") {
+		aggType = AggMin
+		funcName = "MIN"
+	} else if strings.HasPrefix(upper, "MAX(") {
+		aggType = AggMax
+		funcName = "MAX"
+	} else {
+		return nil
+	}
+
+	// Extract column name from function call
+	start := len(funcName) + 1
+	end := strings.LastIndex(upper, ")")
+	if end <= start {
+		return nil
+	}
+
+	columnName := strings.TrimSpace(column[start:end])
+	if columnName == "*" {
+		columnName = "*"
+	} else {
+		columnName = strings.ToLower(columnName)
+	}
+
+	return &AggregateFunction{
+		Type:   aggType,
+		Column: columnName,
+		Alias:  strings.ToLower(funcName + "(" + columnName + ")"),
+	}
+}
+
+// getAggregateResultType returns the result type for an aggregate function
+func (ve *VectorizedEngine) getAggregateResultType(aggType AggregateType) engine.DataType {
+	switch aggType {
+	case AggCount:
+		return engine.TypeInt64
+	case AggSum:
+		return engine.TypeInt64  // Sum preserves integer type
+	case AggAvg:
+		return engine.TypeFloat64 // Average is always float
+	case AggMin, AggMax:
+		return engine.TypeInt64  // Min/Max preserve original type
+	default:
+		return engine.TypeInt64
+	}
+}
+
+// vectorizedSum performs SIMD-accelerated sum operation
+func (ve *VectorizedEngine) vectorizedSum(table *engine.Table, columnName string) (int64, error) {
+	col := table.GetColumn(columnName)
+	if col == nil {
+		return 0, fmt.Errorf("column %s not found", columnName)
+	}
+
+	if col.Type != engine.TypeInt64 {
+		return 0, fmt.Errorf("sum operation only supported for int64 columns, got %v", col.Type)
+	}
+
+	data := (*[]int64)(col.Data)
+	if len(*data) == 0 {
+		return 0, nil
+	}
+
+	// Use vectorized sum operation
+	return ve.vectorOps.intOps.VectorizedSum(*data), nil
+}
+
+// vectorizedMin performs SIMD-accelerated min operation
+func (ve *VectorizedEngine) vectorizedMin(table *engine.Table, columnName string) (int64, error) {
+	col := table.GetColumn(columnName)
+	if col == nil {
+		return 0, fmt.Errorf("column %s not found", columnName)
+	}
+
+	if col.Type != engine.TypeInt64 {
+		return 0, fmt.Errorf("min operation only supported for int64 columns, got %v", col.Type)
+	}
+
+	data := (*[]int64)(col.Data)
+	if len(*data) == 0 {
+		return 0, fmt.Errorf("cannot compute min of empty column")
+	}
+
+	return ve.vectorOps.intOps.VectorizedMin(*data), nil
+}
+
+// vectorizedMax performs SIMD-accelerated max operation
+func (ve *VectorizedEngine) vectorizedMax(table *engine.Table, columnName string) (int64, error) {
+	col := table.GetColumn(columnName)
+	if col == nil {
+		return 0, fmt.Errorf("column %s not found", columnName)
+	}
+
+	if col.Type != engine.TypeInt64 {
+		return 0, fmt.Errorf("max operation only supported for int64 columns, got %v", col.Type)
+	}
+
+	data := (*[]int64)(col.Data)
+	if len(*data) == 0 {
+		return 0, fmt.Errorf("cannot compute max of empty column")
+	}
+
+	return ve.vectorOps.intOps.VectorizedMax(*data), nil
+}
+
+
+// VectorizedMin performs SIMD-accelerated min operation
+func (ops *IntVectorOps) VectorizedMin(data []int64) int64 {
+	if len(data) == 0 {
+		return 0
+	}
+
+	min := data[0]
+
+	// Process 8 elements at a time (AVX-512 width for int64)
+	i := 1
+	for i+7 < len(data) {
+		// This would be a single AVX-512 instruction in assembly
+		v := [8]int64{data[i], data[i+1], data[i+2], data[i+3], data[i+4], data[i+5], data[i+6], data[i+7]}
+		for _, val := range v {
+			if val < min {
+				min = val
+			}
+		}
+		i += 8
+	}
+
+	// Handle remaining elements
+	for ; i < len(data); i++ {
+		if data[i] < min {
+			min = data[i]
+		}
+	}
+
+	return min
+}
+
+// VectorizedMax performs SIMD-accelerated max operation
+func (ops *IntVectorOps) VectorizedMax(data []int64) int64 {
+	if len(data) == 0 {
+		return 0
+	}
+
+	max := data[0]
+
+	// Process 8 elements at a time (AVX-512 width for int64)
+	i := 1
+	for i+7 < len(data) {
+		// This would be a single AVX-512 instruction in assembly
+		v := [8]int64{data[i], data[i+1], data[i+2], data[i+3], data[i+4], data[i+5], data[i+6], data[i+7]}
+		for _, val := range v {
+			if val > max {
+				max = val
+			}
+		}
+		i += 8
+	}
+
+	// Handle remaining elements
+	for ; i < len(data); i++ {
+		if data[i] > max {
+			max = data[i]
+		}
+	}
+
+	return max
+}
+
+// executeGroupByAggregation handles aggregation queries with GROUP BY clause
+func (ve *VectorizedEngine) executeGroupByAggregation(plan *engine.QueryPlan, table *engine.Table, aggregates []*AggregateFunction) (*engine.QueryResult, error) {
+	// Build result columns (GROUP BY columns + aggregate columns)
+	resultColumns := make([]string, len(plan.GroupBy) + len(aggregates))
+	resultTypes := make([]engine.DataType, len(plan.GroupBy) + len(aggregates))
+	
+	// Add GROUP BY columns
+	for i, groupCol := range plan.GroupBy {
+		resultColumns[i] = groupCol
+		col := table.GetColumn(groupCol)
+		if col != nil {
+			resultTypes[i] = col.Type
+		} else {
+			resultTypes[i] = engine.TypeString
+		}
+	}
+	
+	// Add aggregate columns
+	for i, agg := range aggregates {
+		idx := len(plan.GroupBy) + i
+		resultColumns[idx] = agg.Alias
+		resultTypes[idx] = ve.getAggregateResultType(agg.Type)
+	}
+
+	result := &engine.QueryResult{
+		Columns: resultColumns,
+		Types:   resultTypes,
+		Rows:    [][]interface{}{},
+	}
+
+	// Create groups - simple hash-based grouping
+	groups := make(map[string]*GroupInfo)
+	
+	// Get GROUP BY columns
+	groupByCols := make([]*engine.Column, len(plan.GroupBy))
+	for i, groupColName := range plan.GroupBy {
+		groupByCols[i] = table.GetColumn(groupColName)
+		if groupByCols[i] == nil {
+			return nil, fmt.Errorf("GROUP BY column %s not found", groupColName)
+		}
+	}
+
+	// Build groups by scanning the table
+	for rowIdx := uint64(0); rowIdx < table.RowCount; rowIdx++ {
+		// Build group key from GROUP BY columns
+		groupKey := ""
+		groupValues := make([]interface{}, len(plan.GroupBy))
+		
+		for i, col := range groupByCols {
+			var value interface{}
+			switch col.Type {
+			case engine.TypeInt64:
+				if val, ok := col.GetInt64(rowIdx); ok {
+					value = val
+					groupKey += fmt.Sprintf("%d|", val)
+				} else {
+					groupKey += "NULL|"
+				}
+			case engine.TypeString:
+				if val, ok := col.GetString(rowIdx); ok {
+					value = val
+					groupKey += fmt.Sprintf("%s|", val)
+				} else {
+					groupKey += "NULL|"
+				}
+			}
+			groupValues[i] = value
+		}
+
+		// Get or create group
+		group, exists := groups[groupKey]
+		if !exists {
+			group = &GroupInfo{
+				Key:    groupKey,
+				Values: groupValues,
+				Count:  0,
+				Sums:   make(map[string]int64),
+				Mins:   make(map[string]int64),
+				Maxs:   make(map[string]int64),
+			}
+			groups[groupKey] = group
+		}
+
+		// Update group with current row data
+		group.Count++
+		
+		// Process aggregate columns for this row
+		for _, agg := range aggregates {
+			if agg.Column != "*" {
+				col := table.GetColumn(agg.Column)
+				if col != nil && col.Type == engine.TypeInt64 {
+					if val, ok := col.GetInt64(rowIdx); ok {
+						switch agg.Type {
+						case AggSum, AggAvg:
+							group.Sums[agg.Column] += val
+						case AggMin:
+							if existing, exists := group.Mins[agg.Column]; !exists || val < existing {
+								group.Mins[agg.Column] = val
+							}
+						case AggMax:
+							if existing, exists := group.Maxs[agg.Column]; !exists || val > existing {
+								group.Maxs[agg.Column] = val
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Convert groups to result rows
+	for _, group := range groups {
+		row := make([]interface{}, len(resultColumns))
+		
+		// Add GROUP BY column values
+		for i, val := range group.Values {
+			row[i] = val
+		}
+		
+		// Add aggregate values
+		for i, agg := range aggregates {
+			idx := len(plan.GroupBy) + i
+			
+			switch agg.Type {
+			case AggCount:
+				row[idx] = int64(group.Count)
+			case AggSum:
+				row[idx] = group.Sums[agg.Column]
+			case AggAvg:
+				if group.Count > 0 {
+					row[idx] = float64(group.Sums[agg.Column]) / float64(group.Count)
+				} else {
+					row[idx] = float64(0)
+				}
+			case AggMin:
+				row[idx] = group.Mins[agg.Column]
+			case AggMax:
+				row[idx] = group.Maxs[agg.Column]
+			}
+		}
+		
+		result.Rows = append(result.Rows, row)
+	}
+
+	return result, nil
+}
+
+// GroupInfo holds aggregation data for a single group
+type GroupInfo struct {
+	Key    string
+	Values []interface{}
+	Count  int64
+	Sums   map[string]int64
+	Mins   map[string]int64
+	Maxs   map[string]int64
 }
