@@ -42,4 +42,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD nc -z localhost $PORT || exit 1
 
 # Run the binary
-CMD ["./fastpostgres", "server"]
+CMD ["sh", "-c", "./fastpostgres server ${PORT}"]
