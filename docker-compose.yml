@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # FastPostgres - High-performance in-memory database
+  fastpostgres:
+    build: .
+    container_name: fastpostgres_server
+    ports:
+      - "5433:5433"  # FastPostgres default port
+    environment:
+      - PORT=5433
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "5433"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db_network
+    restart: unless-stopped
+
+  # PostgreSQL - For benchmarking comparison
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres_benchmark
+    ports:
+      - "5432:5432"  # Standard PostgreSQL port
+    environment:
+      POSTGRES_DB: fastpostgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-postgres.sql:/docker-entrypoint-initdb.d/init-postgres.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fastpostgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db_network
+    restart: unless-stopped
+
+  # Gin REST API for testing both databases
+  gin_api:
+    build:
+      context: .
+      dockerfile: Dockerfile.gin
+    container_name: gin_api_server
+    ports:
+      - "8080:8080"  # Gin API port
+      - "8081:8081"  # Alternative port for PostgreSQL tests
+    environment:
+      # FastPostgres connection
+      - DATABASE_URL=postgres://postgres@fastpostgres:5433/fastpostgres?sslmode=disable
+      # PostgreSQL connection for comparison
+      - POSTGRES_URL=postgres://postgres:postgres@postgres:5432/fastpostgres?sslmode=disable
+    depends_on:
+      fastpostgres:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - db_network
+    restart: unless-stopped
+
+networks:
+  db_network:
+    driver: bridge
+
+volumes:
+  postgres_data:

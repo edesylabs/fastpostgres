@@ -1,0 +1,42 @@
+# Build stage for Gin API
+FROM golang:1.23-alpine AS gin_builder
+
+# Install git
+RUN apk add --no-cache git
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the Gin API
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o gin_api ./examples/gin_rest_api
+
+# Final stage
+FROM alpine:latest
+
+# Install ca-certificates and curl for health checks
+RUN apk --no-cache add ca-certificates curl
+
+# Create app directory
+WORKDIR /root/
+
+# Copy the binary from builder stage
+COPY --from=gin_builder /app/gin_api .
+
+# Expose port
+EXPOSE 8080 8081
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/api/health || exit 1
+
+# Run the API
+CMD ["./gin_api"]

@@ -392,7 +392,7 @@ func (s *MinimalPGServer) printStats() {
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run minimal_pg_server.go <max_connections> [port]")
-		fmt.Println("Example: go run minimal_pg_server.go 25000 5432")
+		fmt.Println("Example: go run minimal_pg_server.go 25000 5433")
 		return
 	}
 
@@ -402,7 +402,7 @@ func main() {
 		return
 	}
 
-	port := 5432
+	port := 5433
 	if len(os.Args) > 2 {
 		if p, err := strconv.Atoi(os.Args[2]); err == nil {
 			port = p

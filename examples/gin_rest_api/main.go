@@ -132,7 +132,7 @@ func main() {
 	// Get DATABASE_URL from environment or use default
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		connStr = "host=localhost port=5435 user=fastpostgres dbname=fastpostgres sslmode=disable"
+		connStr = "host=localhost port=5433 user=fastpostgres dbname=fastpostgres sslmode=disable"
 		log.Printf("No DATABASE_URL found, using default: %s", connStr)
 	} else {
 		log.Printf("Using DATABASE_URL from environment: %s", connStr)
