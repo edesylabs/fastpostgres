@@ -14,15 +14,18 @@ import (
 	"time"
 
 	"fastpostgres/pkg/engine"
+	"fastpostgres/pkg/query"
 )
 
 // PostgresServer implements the PostgreSQL wire protocol.
 // It provides a PostgreSQL-compatible server that can accept connections
 // from standard PostgreSQL clients and drivers.
 type PostgresServer struct {
-	db       *engine.Database
-	port     string
-	listener net.Listener
+	db          *engine.Database
+	port        string
+	listener    net.Listener
+	parser      *query.SQLParser
+	queryEngine *query.VectorizedEngine
 }
 
 // Message type constants for PostgreSQL wire protocol.
@@ -112,8 +115,10 @@ type QueryResult struct {
 // It initializes the server with the given database and port.
 func NewPostgresServer(db *engine.Database, port string) *PostgresServer {
 	return &PostgresServer{
-		db:   db,
-		port: port,
+		db:          db,
+		port:        port,
+		parser:      query.NewSQLParser(),
+		queryEngine: query.NewVectorizedEngine(),
 	}
 }
 
@@ -366,26 +371,50 @@ func (ps *PostgresServer) handleQuery(pgConn *PostgresConnection, sql string) er
 		return ps.sendEmptyQueryResponse(pgConn)
 	}
 
-	// For now, handle simple queries directly with the database
-	// This is a simplified version - in production you'd use proper SQL parsing
-	if strings.HasPrefix(strings.ToUpper(sql), "SELECT") {
-		// Mock query result for testing
-		columns := []string{"id", "name", "value"}
-		rows := [][]interface{}{
-			{1, "test1", "value1"},
-			{2, "test2", "value2"},
+	// Parse the SQL query
+	plan, err := ps.parser.Parse(sql)
+	if err != nil {
+		log.Printf("SQL parse error: %v", err)
+		return ps.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("SQL parse error: %v", err))
+	}
+
+	// Handle different query types
+	switch plan.Type {
+	case engine.QuerySelect:
+		// Get the table
+		tableInterface, exists := ps.db.Tables.Load(plan.TableName)
+		if !exists {
+			return ps.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("Table not found: %s", plan.TableName))
 		}
 
-		result := &engine.QueryResult{
-			Columns: columns,
-			Rows:    rows,
+		table := tableInterface.(*engine.Table)
+
+		// Execute the query using VectorizedEngine
+		var result *engine.QueryResult
+		if plan.HasAggregates() {
+			result, err = ps.queryEngine.ExecuteAggregateQuery(plan, table)
+		} else {
+			result, err = ps.queryEngine.ExecuteSelect(plan, table)
+		}
+
+		if err != nil {
+			log.Printf("Query execution error: %v", err)
+			return ps.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("Query execution error: %v", err))
 		}
 
 		// Send result
 		if err := ps.sendQueryResult(pgConn, result); err != nil {
 			return err
 		}
-	} else {
+
+	case engine.QueryInsert, engine.QueryUpdate, engine.QueryDelete:
+		// For now, just acknowledge these commands
+		tag := "OK"
+		if err := ps.sendCommandComplete(pgConn, tag); err != nil {
+			return err
+		}
+
+	default:
 		// Handle other query types
 		tag := "OK"
 		if err := ps.sendCommandComplete(pgConn, tag); err != nil {
