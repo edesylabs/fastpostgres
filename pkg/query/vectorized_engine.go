@@ -15,10 +15,13 @@ import (
 // VectorizedEngine executes queries using vectorized operations.
 // It processes data in batches for better CPU cache efficiency.
 type VectorizedEngine struct {
-	batchSize    int
-	workerPool   chan struct{}
-	vectorOps    *VectorOperations
-	simdEnabled  bool
+	batchSize        int
+	workerPool       chan struct{}
+	vectorOps        *VectorOperations
+	simdEnabled      bool
+	parallelExecutor *ParallelExecutor
+	numaAllocator    *NUMAAllocator
+	useParallel      bool
 }
 
 // VectorOperations provides SIMD-optimized operations.
@@ -51,10 +54,13 @@ type ColumnVector struct {
 func NewVectorizedEngine() *VectorizedEngine {
 	workerCount := runtime.NumCPU()
 	return &VectorizedEngine{
-		batchSize:   4096, // Process in batches of 4K rows
-		workerPool:  make(chan struct{}, workerCount),
-		vectorOps:   NewVectorOperations(),
-		simdEnabled: true,
+		batchSize:        4096,
+		workerPool:       make(chan struct{}, workerCount),
+		vectorOps:        NewVectorOperations(),
+		simdEnabled:      true,
+		parallelExecutor: NewParallelExecutor(workerCount),
+		numaAllocator:    NewNUMAAllocator(),
+		useParallel:      true,
 	}
 }
 
@@ -68,14 +74,12 @@ func NewVectorOperations() *VectorOperations {
 
 // ExecuteSelect executes a SELECT query using vectorized operations.
 func (ve *VectorizedEngine) ExecuteSelect(plan *engine.QueryPlan, table *engine.Table) (*engine.QueryResult, error) {
-	// Check if this is an aggregate query
 	if plan.HasAggregates() {
 		return ve.ExecuteAggregateQuery(plan, table)
 	}
 	var selectedCols []*engine.Column
 	var columnNames []string
 
-	// Handle SELECT *
 	if len(plan.Columns) == 1 && plan.Columns[0] == "*" {
 		selectedCols = table.Columns
 		columnNames = make([]string, len(table.Columns))
@@ -83,7 +87,6 @@ func (ve *VectorizedEngine) ExecuteSelect(plan *engine.QueryPlan, table *engine.
 			columnNames[i] = col.Name
 		}
 	} else {
-		// Handle specific columns
 		selectedCols = make([]*engine.Column, len(plan.Columns))
 		columnNames = plan.Columns
 
@@ -96,48 +99,47 @@ func (ve *VectorizedEngine) ExecuteSelect(plan *engine.QueryPlan, table *engine.
 		}
 	}
 
-	// Process in batches for better cache performance
 	result := &engine.QueryResult{
 		Columns: columnNames,
 		Types:   make([]engine.DataType, len(selectedCols)),
 		Rows:    make([][]interface{}, 0),
 	}
 
-	// Get column types
 	for i, col := range selectedCols {
 		result.Types[i] = col.Type
 	}
 
-	batchCount := (int(table.RowCount) + ve.batchSize - 1) / ve.batchSize
-	var wg sync.WaitGroup
-	resultChan := make(chan [][]interface{}, batchCount)
+	if ve.useParallel && table.RowCount > 10000 {
+		result.Rows = ve.parallelExecutor.ExecuteParallelScan(table, selectedCols, plan.Filters)
+	} else {
+		batchCount := (int(table.RowCount) + ve.batchSize - 1) / ve.batchSize
+		var wg sync.WaitGroup
+		resultChan := make(chan [][]interface{}, batchCount)
 
-	// Process batches in parallel
-	for batchIdx := 0; batchIdx < batchCount; batchIdx++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			ve.workerPool <- struct{}{} // Acquire worker
-			defer func() { <-ve.workerPool }() // Release worker
+		for batchIdx := 0; batchIdx < batchCount; batchIdx++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				ve.workerPool <- struct{}{}
+				defer func() { <-ve.workerPool }()
 
-			batch := ve.processBatchWithTable(selectedCols, table.Columns, idx, plan.Filters)
-			if len(batch) > 0 {
-				resultChan <- batch
-			}
-		}(batchIdx)
+				batch := ve.processBatchWithTable(selectedCols, table.Columns, idx, plan.Filters)
+				if len(batch) > 0 {
+					resultChan <- batch
+				}
+			}(batchIdx)
+		}
+
+		go func() {
+			wg.Wait()
+			close(resultChan)
+		}()
+
+		for batch := range resultChan {
+			result.Rows = append(result.Rows, batch...)
+		}
 	}
 
-	// Collect results
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	for batch := range resultChan {
-		result.Rows = append(result.Rows, batch...)
-	}
-
-	// Apply ORDER BY, LIMIT, OFFSET
 	if len(plan.OrderBy) > 0 {
 		ve.applySorting(result, plan.OrderBy)
 	}
@@ -603,7 +605,13 @@ func (ve *VectorizedEngine) vectorizedSum(table *engine.Table, columnName string
 		return 0, nil
 	}
 
-	// Use vectorized sum operation
+	if ve.useParallel && col.Length > 10000 {
+		result := ve.parallelExecutor.ExecuteParallelAggregate(col, AggSum)
+		if result.valid {
+			return result.sum, nil
+		}
+	}
+
 	return ve.vectorOps.intOps.VectorizedSum(*data), nil
 }
 
@@ -623,6 +631,13 @@ func (ve *VectorizedEngine) vectorizedMin(table *engine.Table, columnName string
 		return 0, fmt.Errorf("cannot compute min of empty column")
 	}
 
+	if ve.useParallel && col.Length > 10000 {
+		result := ve.parallelExecutor.ExecuteParallelAggregate(col, AggMin)
+		if result.valid {
+			return result.min, nil
+		}
+	}
+
 	return ve.vectorOps.intOps.VectorizedMin(*data), nil
 }
 
@@ -640,6 +655,13 @@ func (ve *VectorizedEngine) vectorizedMax(table *engine.Table, columnName string
 	data := (*[]int64)(col.Data)
 	if len(*data) == 0 {
 		return 0, fmt.Errorf("cannot compute max of empty column")
+	}
+
+	if ve.useParallel && col.Length > 10000 {
+		result := ve.parallelExecutor.ExecuteParallelAggregate(col, AggMax)
+		if result.valid {
+			return result.max, nil
+		}
 	}
 
 	return ve.vectorOps.intOps.VectorizedMax(*data), nil
