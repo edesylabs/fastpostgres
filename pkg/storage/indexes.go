@@ -1,3 +1,5 @@
+// Package storage provides high-performance indexing structures.
+// It implements B-Tree, Hash, and Bitmap indexes for fast data access.
 package storage
 
 import (
@@ -8,12 +10,13 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// High-performance indexing system
+// IndexManager manages multiple indexes across tables.
 type IndexManager struct {
 	indexes map[string]*IndexStructure
 	mu      sync.RWMutex
 }
 
+// IndexStructure represents a single index with its implementation.
 type IndexStructure struct {
 	Name       string
 	Table      string
@@ -26,13 +29,14 @@ type IndexStructure struct {
 	mu         sync.RWMutex
 }
 
-// B-Tree index for range queries and sorting
+// BTreeIndexStruct implements a B-Tree index for range queries.
 type BTreeIndexStruct struct {
 	root   *BTreeNode
 	height int
 	size   int
 }
 
+// BTreeNode represents a node in the B-Tree structure.
 type BTreeNode struct {
 	keys     []interface{}
 	values   [][]int  // Row indices for each key
@@ -41,7 +45,7 @@ type BTreeNode struct {
 	parent   *BTreeNode
 }
 
-// Hash index for equality lookups
+// HashIndexStruct implements a hash index for O(1) equality lookups.
 type HashIndexStruct struct {
 	buckets []HashBucket
 	size    int
@@ -49,22 +53,25 @@ type HashIndexStruct struct {
 	mask    int
 }
 
+// HashBucket stores entries for a hash table bucket.
 type HashBucket struct {
 	entries []HashEntry
 	mu      sync.RWMutex
 }
 
+// HashEntry represents a single hash table entry.
 type HashEntry struct {
 	key    interface{}
 	rowIds []int
 }
 
-// Bitmap index for low-cardinality columns
+// BitmapIndexStruct implements a bitmap index for low-cardinality data.
 type BitmapIndexStruct struct {
 	values  map[interface{}]*Bitmap
 	rowCount int
 }
 
+// Bitmap stores a bit array for the bitmap index.
 type Bitmap struct {
 	bits []uint64
 	size int
@@ -81,12 +88,14 @@ type indexEntry struct {
 	rowId int
 }
 
+// NewIndexManager creates a new index manager.
 func NewIndexManager() *IndexManager {
 	return &IndexManager{
 		indexes: make(map[string]*IndexStructure),
 	}
 }
 
+// CreateIndex creates a new index structure.
 func (im *IndexManager) CreateIndex(name, table, column string, indexType engine.IndexType, unique bool) error {
 	im.mu.Lock()
 	defer im.mu.Unlock()
@@ -118,12 +127,14 @@ func (im *IndexManager) CreateIndex(name, table, column string, indexType engine
 	return nil
 }
 
+// GetIndex retrieves an index by name.
 func (im *IndexManager) GetIndex(name string) *IndexStructure {
 	im.mu.RLock()
 	defer im.mu.RUnlock()
 	return im.indexes[name]
 }
 
+// BuildIndex constructs an index from table data.
 func (im *IndexManager) BuildIndex(table *engine.Table, indexName string) error {
 	im.mu.RLock()
 	idx, exists := im.indexes[indexName]
@@ -155,7 +166,7 @@ func (im *IndexManager) BuildIndex(table *engine.Table, indexName string) error 
 	}
 }
 
-// B-Tree Implementation
+// NewBTreeIndexStruct creates a new B-Tree index.
 func NewBTreeIndexStruct() *BTreeIndexStruct {
 	root := &BTreeNode{
 		keys:     make([]interface{}, 0, BTreeDegree-1),
@@ -305,7 +316,7 @@ func (btree *BTreeIndexStruct) rangeSearchNode(node *BTreeNode, minKey, maxKey i
 	}
 }
 
-// Hash Index Implementation
+// NewHashIndexStruct creates a new hash index.
 func NewHashIndexStruct() *HashIndexStruct {
 	buckets := make([]HashBucket, HashBuckets)
 	for i := range buckets {
@@ -395,7 +406,7 @@ func (hash *HashIndexStruct) hashKey(key interface{}) int {
 	}
 }
 
-// Bitmap Index Implementation
+// NewBitmapIndexStruct creates a new bitmap index.
 func NewBitmapIndexStruct() *BitmapIndexStruct {
 	return &BitmapIndexStruct{
 		values: make(map[interface{}]*Bitmap),
@@ -433,6 +444,7 @@ func buildBitmapIndexStruct(bitmap *BitmapIndexStruct, col *engine.Column) error
 	return nil
 }
 
+// NewBitmap creates a new bitmap with the specified size.
 func NewBitmap(size int) *Bitmap {
 	wordCount := (size + 63) / 64
 	return &Bitmap{

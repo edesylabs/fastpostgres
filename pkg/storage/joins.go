@@ -1,3 +1,5 @@
+// Package storage provides high-performance join execution capabilities.
+// It implements hash joins, sort-merge joins, and nested loop joins with parallel execution support.
 package storage
 
 import (
@@ -8,32 +10,35 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// Join execution engine for high-performance joins
+// JoinEngine executes various types of join operations efficiently.
+// It supports hash joins, sort-merge joins, and nested loop joins.
 type JoinEngine struct {
 	hashTableSize int
 	useParallel   bool
 	workerCount   int
 }
 
-// Hash table for hash joins
+// HashTable stores build-side data for hash join operations.
 type HashTable struct {
 	buckets []HashJoinBucket
 	mask    int
 	size    int
 }
 
+// HashJoinBucket represents a single hash table bucket.
 type HashJoinBucket struct {
 	entries []HashJoinEntry
 	mu      sync.RWMutex
 }
 
+// HashJoinEntry stores a join key and its associated row IDs.
 type HashJoinEntry struct {
 	key    interface{}
 	rowIds []int
 	rows   [][]interface{}
 }
 
-// Join result represents the output of a join operation
+// JoinResult contains the output of a join operation with statistics.
 type JoinResult struct {
 	Columns []string
 	Types   []engine.DataType
@@ -41,6 +46,7 @@ type JoinResult struct {
 	Stats   JoinStats
 }
 
+// JoinStats tracks performance metrics for join operations.
 type JoinStats struct {
 	BuildTime    int64 // nanoseconds
 	ProbeTime    int64 // nanoseconds
@@ -48,7 +54,7 @@ type JoinStats struct {
 	HashCollisions int
 }
 
-// Sorted table for sort-merge joins
+// SortedTable represents a table sorted by the join column.
 type SortedTable struct {
 	columns    []string
 	types      []engine.DataType
@@ -57,6 +63,7 @@ type SortedTable struct {
 	sorted     bool
 }
 
+// NewJoinEngine creates a new join execution engine.
 func NewJoinEngine() *JoinEngine {
 	return &JoinEngine{
 		hashTableSize: 65536,
@@ -65,7 +72,8 @@ func NewJoinEngine() *JoinEngine {
 	}
 }
 
-// Hash Join Implementation - best for equi-joins
+// ExecuteHashJoin performs a hash join between two tables.
+// Hash joins are optimal for equi-joins with large datasets.
 func (je *JoinEngine) ExecuteHashJoin(leftTable, rightTable *engine.Table, joinExpr *engine.JoinExpression) (*JoinResult, error) {
 	// Find join columns
 	leftCol := leftTable.GetColumn(joinExpr.LeftCol)
@@ -293,7 +301,8 @@ func (je *JoinEngine) probeHashTable(ht *HashTable, probeTable *engine.Table, pr
 	return result
 }
 
-// Sort-Merge Join Implementation - best for sorted data or range joins
+// ExecuteSortMergeJoin performs a sort-merge join between two tables.
+// Sort-merge joins are optimal for pre-sorted data or range queries.
 func (je *JoinEngine) ExecuteSortMergeJoin(leftTable, rightTable *engine.Table, joinExpr *engine.JoinExpression) (*JoinResult, error) {
 	// Get join columns
 	leftCol := leftTable.GetColumn(joinExpr.LeftCol)
@@ -444,7 +453,8 @@ func (je *JoinEngine) mergeJoin(left, right *SortedTable, joinExpr *engine.JoinE
 	return result
 }
 
-// Nested Loop Join - fallback for non-equi joins
+// ExecuteNestedLoopJoin performs a nested loop join between two tables.
+// Nested loop joins handle any join condition but have O(n*m) complexity.
 func (je *JoinEngine) ExecuteNestedLoopJoin(leftTable, rightTable *engine.Table, joinExpr *engine.JoinExpression) (*JoinResult, error) {
 	// Prepare result structure
 	var resultColumns []string

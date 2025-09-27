@@ -1,3 +1,5 @@
+// Package query provides SQL parsing and query plan generation.
+// It parses SQL statements and generates optimized query plans.
 package query
 
 import (
@@ -8,12 +10,13 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// SQL Parser for FastPostgres
+// SQLParser parses SQL statements into query plans.
 type SQLParser struct {
 	keywords map[string]TokenType
 	operators map[string]engine.FilterOperator
 }
 
+// TokenType identifies different SQL token types.
 type TokenType int
 
 const (
@@ -55,13 +58,14 @@ const (
 	TokenEOF
 )
 
+// Token represents a parsed SQL token.
 type Token struct {
 	Type  TokenType
 	Value string
 	Pos   int
 }
 
-// NewSQLParser creates a new SQL parser
+// NewSQLParser creates a SQL parser with initialized keywords and operators.
 func NewSQLParser() *SQLParser {
 	parser := &SQLParser{
 		keywords: make(map[string]TokenType),

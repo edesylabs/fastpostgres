@@ -1,3 +1,6 @@
+// Package storage provides data compression capabilities for columnar data.
+// It implements multiple compression algorithms optimized for different data types
+// including RLE, Delta, Dictionary, Bit Packing, and GZIP compression.
 package storage
 
 import (
@@ -13,13 +16,15 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// Compression engine for columnar data
+// CompressionEngine manages compression algorithms for columnar data.
+// It automatically selects the best compression algorithm based on data characteristics.
 type CompressionEngine struct {
 	algorithms map[engine.DataType]CompressionAlgorithm
 	stats      *CompressionStats
 	mu         sync.RWMutex
 }
 
+// CompressionAlgorithm defines the interface for compression implementations.
 type CompressionAlgorithm interface {
 	Compress(data unsafe.Pointer, length int) (*CompressedBlock, error)
 	Decompress(block *CompressedBlock) (unsafe.Pointer, error)
@@ -27,8 +32,10 @@ type CompressionAlgorithm interface {
 	GetType() CompressionType
 }
 
+// CompressionType identifies the compression algorithm used.
 type CompressionType uint8
 
+// Compression algorithm types.
 const (
 	CompressionNone CompressionType = iota
 	CompressionRLE        // Run-Length Encoding
@@ -39,7 +46,7 @@ const (
 	CompressionLZ4        // LZ4 compression (placeholder)
 )
 
-// Compressed data block
+// CompressedBlock represents a compressed block of data with metadata.
 type CompressedBlock struct {
 	Type         CompressionType
 	OriginalSize int
@@ -48,7 +55,7 @@ type CompressedBlock struct {
 	Metadata     map[string]interface{} // Algorithm-specific metadata
 }
 
-// Compression statistics
+// CompressionStats tracks overall compression performance metrics.
 type CompressionStats struct {
 	TotalOriginalBytes   int64
 	TotalCompressedBytes int64
@@ -57,6 +64,7 @@ type CompressionStats struct {
 	mu                   sync.RWMutex
 }
 
+// AlgorithmStats tracks statistics for a specific compression algorithm.
 type AlgorithmStats struct {
 	UsageCount       int64
 	BytesCompressed  int64
@@ -64,32 +72,40 @@ type AlgorithmStats struct {
 	AvgCompressionTime int64 // nanoseconds
 }
 
-// Run-Length Encoding for repetitive data
+// RLECompressor implements Run-Length Encoding for repetitive data.
+// It compresses sequences of identical values into value-count pairs.
 type RLECompressor struct{}
 
+// RLEEntry represents a run-length encoded value and count.
 type RLEEntry struct {
 	Value interface{}
 	Count int32
 }
 
-// Delta encoding for sequential numeric data
+// DeltaCompressor implements Delta Encoding for sequential numeric data.
+// It stores differences between consecutive values rather than absolute values.
 type DeltaCompressor struct{}
 
-// Dictionary encoding for low-cardinality string data
+// DictionaryCompressor implements Dictionary Encoding for low-cardinality string data.
+// It builds a dictionary of unique values and stores indices instead of full strings.
 type DictionaryCompressor struct{}
 
+// DictionaryBlock stores dictionary data with indices.
 type DictionaryBlock struct {
 	Dictionary []string
 	Indices    []uint32
 }
 
-// Bit packing for small integer ranges
+// BitPackingCompressor implements Bit Packing for small integer ranges.
+// It uses only the minimum number of bits needed to represent value ranges.
 type BitPackingCompressor struct{}
 
-// GZIP compressor for general-purpose compression
+// GZIPCompressor implements GZIP compression for general-purpose use.
+// It provides good compression ratios for various data types.
 type GZIPCompressor struct{}
 
-// NewCompressionEngine creates a new compression engine
+// NewCompressionEngine creates a new compression engine with default algorithms.
+// It registers appropriate compression algorithms for different data types.
 func NewCompressionEngine() *CompressionEngine {
 	ce := &CompressionEngine{
 		algorithms: make(map[engine.DataType]CompressionAlgorithm),
@@ -106,7 +122,8 @@ func NewCompressionEngine() *CompressionEngine {
 	return ce
 }
 
-// Compress column data using the best algorithm for the data type
+// CompressColumn compresses column data using the optimal algorithm.
+// It analyzes data characteristics and selects the most efficient compression method.
 func (ce *CompressionEngine) CompressColumn(col *engine.Column) (*CompressedBlock, error) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
@@ -126,7 +143,8 @@ func (ce *CompressionEngine) CompressColumn(col *engine.Column) (*CompressedBloc
 	return block, nil
 }
 
-// Select the best compression algorithm for the given column
+// selectBestAlgorithm chooses the optimal compression algorithm.
+// Selection is based on data type, cardinality, and pattern analysis.
 func (ce *CompressionEngine) selectBestAlgorithm(col *engine.Column) CompressionAlgorithm {
 	// Analyze data characteristics
 	switch col.Type {
@@ -148,7 +166,7 @@ func (ce *CompressionEngine) selectBestAlgorithm(col *engine.Column) Compression
 	}
 }
 
-// RLE Compression Implementation
+// Compress implements RLE compression for data.
 func (rle *RLECompressor) Compress(data unsafe.Pointer, length int) (*CompressedBlock, error) {
 	// Try to cast to different types based on the data pointer
 	if int64Data := (*[]int64)(data); int64Data != nil {
@@ -254,7 +272,7 @@ func (rle *RLECompressor) GetType() CompressionType {
 	return CompressionRLE
 }
 
-// Delta Compression Implementation
+// Compress implements Delta encoding compression for sequential numeric data.
 func (delta *DeltaCompressor) Compress(data unsafe.Pointer, length int) (*CompressedBlock, error) {
 	int64Data := (*[]int64)(data)
 	if len(*int64Data) == 0 {
@@ -300,7 +318,7 @@ func (delta *DeltaCompressor) GetType() CompressionType {
 	return CompressionDelta
 }
 
-// Dictionary Compression Implementation
+// Compress implements Dictionary encoding compression for string data.
 func (dict *DictionaryCompressor) Compress(data unsafe.Pointer, length int) (*CompressedBlock, error) {
 	stringData := (*[]string)(data)
 	if len(*stringData) == 0 {
@@ -371,7 +389,7 @@ func (dict *DictionaryCompressor) GetType() CompressionType {
 	return CompressionDictionary
 }
 
-// Bit Packing Implementation
+// Compress implements Bit Packing compression for integer data with small ranges.
 func (bp *BitPackingCompressor) Compress(data unsafe.Pointer, length int) (*CompressedBlock, error) {
 	int32Data := (*[]int32)(data)
 	if len(*int32Data) == 0 {
@@ -453,7 +471,7 @@ func (bp *BitPackingCompressor) GetType() CompressionType {
 	return CompressionBitPacking
 }
 
-// GZIP Compression Implementation
+// Compress implements GZIP compression for general-purpose data.
 func (gz *GZIPCompressor) Compress(data unsafe.Pointer, length int) (*CompressedBlock, error) {
 	// Convert data to bytes for GZIP compression
 	var inputBytes []byte
@@ -611,7 +629,7 @@ func writeVarInt(buf *bytes.Buffer, value int64) error {
 	return nil
 }
 
-// Get compression statistics
+// GetStats returns a copy of current compression statistics.
 func (ce *CompressionEngine) GetStats() *CompressionStats {
 	ce.stats.mu.RLock()
 	defer ce.stats.mu.RUnlock()
@@ -638,7 +656,7 @@ func (ce *CompressionEngine) GetStats() *CompressionStats {
 // Note: Integration with Column moved to avoid circular dependencies.
 // Use CompressionEngine.CompressColumn() directly instead.
 
-// Enhanced column with compression support
+// CompressedColumn extends a column with compression capabilities.
 type CompressedColumn struct {
 	*engine.Column
 	CompressedBlock *CompressedBlock
@@ -646,7 +664,7 @@ type CompressedColumn struct {
 	CompressionType CompressionType
 }
 
-// Create compressed column
+// NewCompressedColumn creates a new column with compression support.
 func NewCompressedColumn(name string, dataType engine.DataType, capacity uint64) *CompressedColumn {
 	baseCol := engine.NewColumn(name, dataType, capacity)
 	return &CompressedColumn{
@@ -655,7 +673,7 @@ func NewCompressedColumn(name string, dataType engine.DataType, capacity uint64)
 	}
 }
 
-// Compress the column data
+// CompressData compresses the column's data.
 func (cc *CompressedColumn) CompressData() error {
 	if cc.IsCompressed {
 		return nil // Already compressed
@@ -674,7 +692,7 @@ func (cc *CompressedColumn) CompressData() error {
 	return nil
 }
 
-// Get compression info
+// GetCompressionInfo returns compression metadata and statistics.
 func (cc *CompressedColumn) GetCompressionInfo() map[string]interface{} {
 	if !cc.IsCompressed || cc.CompressedBlock == nil {
 		return map[string]interface{}{

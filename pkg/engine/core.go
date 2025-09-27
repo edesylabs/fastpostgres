@@ -1,3 +1,5 @@
+// Package engine provides the core database engine components.
+// It defines the fundamental data structures for tables, columns, indexes, and queries.
 package engine
 
 import (
@@ -7,7 +9,7 @@ import (
 	"unsafe"
 )
 
-// Data types supported by FastPostgres
+// DataType identifies the type of data stored in a column.
 type DataType uint8
 
 const (
@@ -21,7 +23,7 @@ const (
 	TypeDecimal
 )
 
-// Column represents a columnar storage column
+// Column represents a single column in columnar storage format.
 type Column struct {
 	Name     string
 	Type     DataType
@@ -32,7 +34,7 @@ type Column struct {
 	mu       sync.RWMutex
 }
 
-// Table represents a columnar table
+// Table represents a table with columnar storage.
 type Table struct {
 	Name      string
 	Columns   []*Column
@@ -41,7 +43,7 @@ type Table struct {
 	mu        sync.RWMutex
 }
 
-// Index represents various index types
+// Index represents an index structure on a column.
 type Index struct {
 	Name       string
 	Column     string
@@ -51,6 +53,7 @@ type Index struct {
 	mu         sync.RWMutex
 }
 
+// IndexType identifies the index implementation type.
 type IndexType uint8
 
 const (
@@ -60,7 +63,7 @@ const (
 	BloomFilter
 )
 
-// Database represents the main database engine
+// Database is the main database engine managing tables and connections.
 type Database struct {
 	Name           string
 	Tables         sync.Map // map[string]*Table
@@ -72,7 +75,7 @@ type Database struct {
 	Stats          *Statistics
 }
 
-// Query plan and execution engine
+// QueryPlan represents a parsed and optimized query execution plan.
 type QueryPlan struct {
 	Type       QueryType
 	TableName  string
@@ -87,6 +90,7 @@ type QueryPlan struct {
 	Optimized  bool
 }
 
+// QueryType identifies the type of SQL query.
 type QueryType uint8
 
 const (

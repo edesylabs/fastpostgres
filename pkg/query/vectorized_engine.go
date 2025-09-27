@@ -1,3 +1,5 @@
+// Package query provides vectorized query execution with SIMD optimizations.
+// It processes data in batches for improved CPU cache utilization and throughput.
 package query
 
 import (
@@ -10,7 +12,8 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// Vectorized execution engine for high-performance queries
+// VectorizedEngine executes queries using vectorized operations.
+// It processes data in batches for better CPU cache efficiency.
 type VectorizedEngine struct {
 	batchSize    int
 	workerPool   chan struct{}
@@ -18,7 +21,7 @@ type VectorizedEngine struct {
 	simdEnabled  bool
 }
 
-// Vector operations for SIMD processing
+// VectorOperations provides SIMD-optimized operations.
 type VectorOperations struct {
 	intOps    *IntVectorOps
 	floatOps  *FloatVectorOps
@@ -29,13 +32,14 @@ type IntVectorOps struct{}
 type FloatVectorOps struct{}
 type StringVectorOps struct{}
 
-// Batch represents a batch of rows for vectorized processing
+// Batch represents a batch of rows for vectorized execution.
 type Batch struct {
 	Columns   []*ColumnVector
 	RowCount  int
 	Selection []int // Selected row indices
 }
 
+// ColumnVector represents a column of data in vector format.
 type ColumnVector struct {
 	Type   engine.DataType
 	Data   unsafe.Pointer
@@ -43,7 +47,7 @@ type ColumnVector struct {
 	Length int
 }
 
-// NewVectorizedEngine creates a new vectorized execution engine
+// NewVectorizedEngine creates a vectorized query engine.
 func NewVectorizedEngine() *VectorizedEngine {
 	workerCount := runtime.NumCPU()
 	return &VectorizedEngine{
@@ -62,7 +66,7 @@ func NewVectorOperations() *VectorOperations {
 	}
 }
 
-// Vectorized SELECT execution
+// ExecuteSelect executes a SELECT query using vectorized operations.
 func (ve *VectorizedEngine) ExecuteSelect(plan *engine.QueryPlan, table *engine.Table) (*engine.QueryResult, error) {
 	// Check if this is an aggregate query
 	if plan.HasAggregates() {

@@ -1,3 +1,5 @@
+// Package query provides optimized query execution engines.
+// It includes point lookup optimizations with hybrid row-column storage and adaptive caching.
 package query
 
 import (
@@ -12,7 +14,8 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// OptimizedTable with hybrid row-column storage
+// OptimizedTable implements a hybrid row-column storage with optimizations for point lookups.
+// It maintains row caches, primary key indexes, and hot data storage for frequently accessed rows.
 type OptimizedTable struct {
 	*engine.Table
 
@@ -35,7 +38,7 @@ type OptimizedTable struct {
 	Config        *OptimizationConfig
 }
 
-// AdaptiveRowCache for frequently accessed rows
+// AdaptiveRowCache implements an LRU cache for frequently accessed rows.
 type AdaptiveRowCache struct {
 	cache      sync.Map // map[int64]*CachedRow
 	lru        *LRUList
@@ -45,6 +48,7 @@ type AdaptiveRowCache struct {
 	mu         sync.RWMutex
 }
 
+// CachedRow represents a cached row with access statistics.
 type CachedRow struct {
 	Data         map[string]interface{}
 	AccessCount  uint32
@@ -54,7 +58,7 @@ type CachedRow struct {
 	prev         *CachedRow
 }
 
-// PrimaryKeyIndex with direct row pointers
+// PrimaryKeyIndex provides O(1) primary key lookups with direct memory pointers.
 type PrimaryKeyIndex struct {
 	// Hash table for O(1) lookups
 	hashTable    map[int64]*RowPointer
@@ -70,13 +74,14 @@ type PrimaryKeyIndex struct {
 	hits         uint64
 }
 
+// RowPointer stores direct pointers to column data for fast access.
 type RowPointer struct {
 	RowID      int64
 	ColumnPtrs map[string]unsafe.Pointer // Direct pointers to column data
 	Offset     uint64                    // Position in column arrays
 }
 
-// HotDataStore keeps frequently accessed rows in row format
+// HotDataStore maintains frequently accessed rows in row-oriented format.
 type HotDataStore struct {
 	rows       sync.Map // map[int64]*HotRow
 	threshold  int      // Access count threshold
@@ -84,6 +89,7 @@ type HotDataStore struct {
 	currentSize int32
 }
 
+// HotRow represents a row stored in row format for fast access.
 type HotRow struct {
 	RowID       int64
 	Data        []byte           // Serialized row data
@@ -91,6 +97,7 @@ type HotRow struct {
 	AccessCount uint32
 }
 
+// ColumnMetadata describes a column's schema information.
 type ColumnMetadata struct {
 	Name   string
 	Type   engine.DataType
@@ -98,7 +105,7 @@ type ColumnMetadata struct {
 	Size   int
 }
 
-// AccessStatistics tracks access patterns
+// AccessStatistics tracks query access patterns for adaptive optimization.
 type AccessStatistics struct {
 	PointLookups    uint64
 	RangeLookups    uint64
@@ -107,6 +114,7 @@ type AccessStatistics struct {
 	mu             sync.RWMutex
 }
 
+// OptimizationConfig configures optimization parameters.
 type OptimizationConfig struct {
 	RowCacheSize      int
 	HotDataThreshold  int
@@ -115,7 +123,7 @@ type OptimizationConfig struct {
 	PKIndexType       string // "hash" or "btree"
 }
 
-// LRU list for cache eviction
+// LRUList implements a doubly-linked list for LRU cache eviction.
 type LRUList struct {
 	head *CachedRow
 	tail *CachedRow
@@ -123,7 +131,7 @@ type LRUList struct {
 	mu   sync.Mutex
 }
 
-// NewOptimizedTable creates a table with point lookup optimizations
+// NewOptimizedTable creates a table optimized for point lookups.
 func NewOptimizedTable(name string, config *OptimizationConfig) *OptimizedTable {
 	if config == nil {
 		config = &OptimizationConfig{
@@ -146,7 +154,7 @@ func NewOptimizedTable(name string, config *OptimizationConfig) *OptimizedTable 
 	}
 }
 
-// NewAdaptiveRowCache creates an adaptive cache for rows
+// NewAdaptiveRowCache creates an LRU cache for rows.
 func NewAdaptiveRowCache(maxSize int) *AdaptiveRowCache {
 	return &AdaptiveRowCache{
 		lru:     &LRUList{},
@@ -154,7 +162,7 @@ func NewAdaptiveRowCache(maxSize int) *AdaptiveRowCache {
 	}
 }
 
-// NewPrimaryKeyIndex creates an optimized primary key index
+// NewPrimaryKeyIndex creates a hash-based primary key index.
 func NewPrimaryKeyIndex() *PrimaryKeyIndex {
 	return &PrimaryKeyIndex{
 		hashTable:  make(map[int64]*RowPointer),
@@ -162,7 +170,7 @@ func NewPrimaryKeyIndex() *PrimaryKeyIndex {
 	}
 }
 
-// NewHotDataStore creates storage for frequently accessed rows
+// NewHotDataStore creates storage for hot data in row format.
 func NewHotDataStore(threshold, maxRows int) *HotDataStore {
 	return &HotDataStore{
 		threshold: threshold,
@@ -176,7 +184,7 @@ func NewAccessStatistics() *AccessStatistics {
 	}
 }
 
-// OptimizedInsertRow inserts with index updates
+// OptimizedInsertRow inserts a row and updates all indexes and caches.
 func (t *OptimizedTable) OptimizedInsertRow(values map[string]interface{}) error {
 	// Regular columnar insert
 	err := t.Table.InsertRow(values)
@@ -201,7 +209,8 @@ func (t *OptimizedTable) OptimizedInsertRow(values map[string]interface{}) error
 	return nil
 }
 
-// OptimizedPointLookup performs fast single-row lookup
+// OptimizedPointLookup performs a multi-tier lookup for a single row.
+// It checks caches, hot storage, indexes, and finally does a columnar scan.
 func (t *OptimizedTable) OptimizedPointLookup(id int64) (map[string]interface{}, bool) {
 	atomic.AddUint64(&t.AccessStats.PointLookups, 1)
 
@@ -242,7 +251,7 @@ func (t *OptimizedTable) OptimizedPointLookup(id int64) (map[string]interface{},
 	return nil, false
 }
 
-// Get retrieves cached row
+// Get retrieves a row from the cache.
 func (arc *AdaptiveRowCache) Get(rowID int64) (map[string]interface{}, bool) {
 	if cached, exists := arc.cache.Load(rowID); exists {
 		row := cached.(*CachedRow)
@@ -259,7 +268,7 @@ func (arc *AdaptiveRowCache) Get(rowID int64) (map[string]interface{}, bool) {
 	return nil, false
 }
 
-// Put stores row in cache
+// Put stores a row in the cache with LRU eviction.
 func (arc *AdaptiveRowCache) Put(rowID int64, data map[string]interface{}) {
 	newRow := &CachedRow{
 		Data:         data,
@@ -331,7 +340,7 @@ func (hds *HotDataStore) StoreRow(rowID int64, data []byte, schema []ColumnMetad
 	atomic.AddInt32(&hds.currentSize, 1)
 }
 
-// OptimizedBloomFilter for fast existence checks
+// OptimizedBloomFilter implements a space-efficient probabilistic data structure.
 type OptimizedBloomFilter struct {
 	bits     []uint64
 	size     uint64
@@ -575,7 +584,7 @@ func (lru *LRUList) RemoveLast() *CachedRow {
 	return removed
 }
 
-// GetCacheStats returns cache performance statistics
+// GetCacheStats returns cache hit/miss statistics.
 func (arc *AdaptiveRowCache) GetCacheStats() (hits, misses uint64, hitRatio float64) {
 	hits = atomic.LoadUint64(&arc.hits)
 	misses = atomic.LoadUint64(&arc.misses)
@@ -588,7 +597,7 @@ func (arc *AdaptiveRowCache) GetCacheStats() (hits, misses uint64, hitRatio floa
 	return hits, misses, hitRatio
 }
 
-// GetIndexStats returns index performance statistics
+// GetIndexStats returns index lookup statistics.
 func (pki *PrimaryKeyIndex) GetIndexStats() (lookups, hits uint64, hitRatio float64) {
 	lookups = atomic.LoadUint64(&pki.lookups)
 	hits = atomic.LoadUint64(&pki.hits)

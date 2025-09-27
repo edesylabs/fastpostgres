@@ -1,3 +1,5 @@
+// Package query provides advanced query result caching.
+// It implements LRU-based caching with automatic expiration and invalidation.
 package query
 
 import (
@@ -10,7 +12,7 @@ import (
 	"fastpostgres/pkg/storage"
 )
 
-// Advanced query result caching system
+// QueryCacheEngine manages cached query results with expiration and invalidation.
 type QueryCacheEngine struct {
 	cache          map[string]*CachedResult
 	accessTimes    map[string]time.Time
@@ -24,7 +26,7 @@ type QueryCacheEngine struct {
 	stopCleanup    chan bool
 }
 
-// Cached result with metadata
+// CachedResult stores a query result with metadata and statistics.
 type CachedResult struct {
 	Result       *engine.QueryResult
 	CreatedAt    time.Time
@@ -35,7 +37,7 @@ type CachedResult struct {
 	EstimatedMemory int64
 }
 
-// Cache statistics
+// CacheStats provides metrics about cache performance.
 type CacheStats struct {
 	HitCount      int64
 	MissCount     int64
@@ -46,7 +48,7 @@ type CacheStats struct {
 	MemoryUsage   int64
 }
 
-// Cache configuration
+// CacheConfig configures cache behavior and limits.
 type CacheConfig struct {
 	MaxSize        int
 	MaxAge         time.Duration
@@ -54,7 +56,7 @@ type CacheConfig struct {
 	MaxMemoryMB    int64
 }
 
-// NewQueryCacheEngine creates a new query cache with configuration
+// NewQueryCacheEngine creates a query cache with automatic cleanup.
 func NewQueryCacheEngine(config *CacheConfig) *QueryCacheEngine {
 	if config == nil {
 		config = &CacheConfig{
@@ -79,7 +81,7 @@ func NewQueryCacheEngine(config *CacheConfig) *QueryCacheEngine {
 	return qce
 }
 
-// Get retrieves a cached result if available and valid
+// Get retrieves a cached query result if it exists and is valid.
 func (qce *QueryCacheEngine) Get(queryHash string) (*engine.QueryResult, bool) {
 	qce.mu.RLock()
 	cached, exists := qce.cache[queryHash]
@@ -114,7 +116,7 @@ func (qce *QueryCacheEngine) Get(queryHash string) (*engine.QueryResult, bool) {
 	return cached.Result, true
 }
 
-// Put stores a query result in the cache
+// Put stores a query result in the cache with automatic eviction.
 func (qce *QueryCacheEngine) Put(queryHash string, result *engine.QueryResult, tableNames []string) {
 	qce.mu.Lock()
 	defer qce.mu.Unlock()
@@ -141,7 +143,7 @@ func (qce *QueryCacheEngine) Put(queryHash string, result *engine.QueryResult, t
 	qce.accessTimes[queryHash] = cached.LastAccessed
 }
 
-// InvalidateTable removes all cached results that depend on a specific table
+// InvalidateTable removes cached results for queries involving the table.
 func (qce *QueryCacheEngine) InvalidateTable(tableName string) int {
 	qce.mu.Lock()
 	defer qce.mu.Unlock()
@@ -165,7 +167,7 @@ func (qce *QueryCacheEngine) InvalidateTable(tableName string) int {
 	return len(toDelete)
 }
 
-// Clear removes all cached results
+// Clear removes all entries from the cache.
 func (qce *QueryCacheEngine) Clear() {
 	qce.mu.Lock()
 	defer qce.mu.Unlock()
@@ -175,7 +177,7 @@ func (qce *QueryCacheEngine) Clear() {
 	qce.accessTimes = make(map[string]time.Time)
 }
 
-// GetStats returns cache statistics
+// GetStats returns current cache statistics.
 func (qce *QueryCacheEngine) GetStats() *CacheStats {
 	qce.mu.RLock()
 	defer qce.mu.RUnlock()
@@ -307,7 +309,7 @@ func (qce *QueryCacheEngine) Stop() {
 	}
 }
 
-// GenerateQueryHash creates a unique hash for a query
+// GenerateQueryHash creates an MD5 hash for a query and its parameters.
 func GenerateQueryHash(sql string, params ...interface{}) string {
 	hasher := md5.New()
 	hasher.Write([]byte(sql))
@@ -332,13 +334,13 @@ func (db *engine.Database) SetupQueryCache(config *CacheConfig) {
 }
 */
 
-// Enhanced QueryCache with advanced caching
+// EnhancedQueryCache extends the basic cache with advanced features.
 type EnhancedQueryCache struct {
 	*engine.QueryCache
 	engine *QueryCacheEngine
 }
 
-// CachedExecuteSelect executes a SELECT query with caching
+// CachedExecuteSelect executes a query with result caching.
 func (ve *VectorizedEngine) CachedExecuteSelect(plan *engine.QueryPlan, table *engine.Table, cacheEngine *QueryCacheEngine) (*engine.QueryResult, error) {
 	// Generate cache key from query plan
 	queryHash := ve.generatePlanHash(plan, table.Name)
@@ -409,7 +411,7 @@ func (ve *VectorizedEngine) generatePlanHash(plan *engine.QueryPlan, tableName s
 	return GenerateQueryHash(hashData)
 }
 
-// Smart cache warming for frequently used queries
+// CacheWarmer pre-executes common queries to populate the cache.
 type CacheWarmer struct {
 	cacheEngine *QueryCacheEngine
 	database    *engine.Database
@@ -417,6 +419,7 @@ type CacheWarmer struct {
 	warmQueries []WarmQuery
 }
 
+// WarmQuery describes a query to pre-execute for cache warming.
 type WarmQuery struct {
 	SQL       string
 	TableName string
@@ -441,7 +444,7 @@ func (cw *CacheWarmer) AddWarmQuery(sql, tableName string, frequency int) {
 	})
 }
 
-// WarmCache pre-executes important queries to populate the cache
+// WarmCache executes all warm queries to populate the cache.
 func (cw *CacheWarmer) WarmCache() error {
 	parser := NewSQLParser()
 

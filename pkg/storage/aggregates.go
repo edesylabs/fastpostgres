@@ -1,3 +1,5 @@
+// Package storage provides aggregate function parsing and execution.
+// It supports common aggregates like COUNT, SUM, AVG, MIN, and MAX.
 package storage
 
 import (
@@ -6,7 +8,7 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// Aggregate function types
+// AggregateType identifies the type of aggregate function.
 type AggregateType uint8
 
 const (
@@ -17,6 +19,7 @@ const (
 	AggMax
 )
 
+// AggregateFunction represents a parsed aggregate function call.
 type AggregateFunction struct {
 	Type   AggregateType
 	Column string
@@ -26,6 +29,7 @@ type AggregateFunction struct {
 // Note: Methods for QueryPlan have been moved to pkg/engine to avoid circular import dependencies.
 // These functions provide alternative implementations:
 
+// HasAggregates checks if a query plan contains aggregate functions.
 func HasAggregates(qp *engine.QueryPlan) bool {
 	for _, col := range qp.Columns {
 		if isAggregateFunction(col) {
@@ -35,6 +39,7 @@ func HasAggregates(qp *engine.QueryPlan) bool {
 	return false
 }
 
+// GetAggregates extracts all aggregate functions from a query plan.
 func GetAggregates(qp *engine.QueryPlan) []*AggregateFunction {
 	var aggregates []*AggregateFunction
 
@@ -47,6 +52,7 @@ func GetAggregates(qp *engine.QueryPlan) []*AggregateFunction {
 	return aggregates
 }
 
+// isAggregateFunction checks if a column expression is an aggregate.
 func isAggregateFunction(column string) bool {
 	upper := strings.ToUpper(column)
 	return strings.HasPrefix(upper, "COUNT(") ||
@@ -56,6 +62,7 @@ func isAggregateFunction(column string) bool {
 		   strings.HasPrefix(upper, "MAX(")
 }
 
+// parseAggregateFunction parses an aggregate function from a column expression.
 func parseAggregateFunction(column string) *AggregateFunction {
 	upper := strings.ToUpper(column)
 

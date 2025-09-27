@@ -1,3 +1,5 @@
+// Package engine provides connection stress testing capabilities.
+// It implements load testing tools for measuring server connection handling.
 package engine
 
 import (
@@ -13,6 +15,7 @@ import (
 	"time"
 )
 
+// StressTestConfig defines parameters for connection stress testing.
 type StressTestConfig struct {
 	ServerHost         string
 	ServerPort         int
@@ -23,6 +26,7 @@ type StressTestConfig struct {
 	RequestDelay       time.Duration
 }
 
+// StressTestResults captures metrics from a stress test run.
 type StressTestResults struct {
 	TotalConnections      int64
 	SuccessfulConnections int64
@@ -41,6 +45,7 @@ type StressTestResults struct {
 	errorsMutex          sync.Mutex
 }
 
+// AddError adds an error message to the results.
 func (r *StressTestResults) AddError(err string) {
 	r.errorsMutex.Lock()
 	defer r.errorsMutex.Unlock()
@@ -49,6 +54,7 @@ func (r *StressTestResults) AddError(err string) {
 	}
 }
 
+// NewStressTestConfig creates a default stress test configuration.
 func NewStressTestConfig() *StressTestConfig {
 	return &StressTestConfig{
 		ServerHost:         "localhost",

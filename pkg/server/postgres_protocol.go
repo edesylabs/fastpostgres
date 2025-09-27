@@ -1,3 +1,6 @@
+// Package server implements the PostgreSQL wire protocol for FastPostgres.
+// It provides a PostgreSQL-compatible server interface that accepts connections
+// and executes queries using the FastPostgres engine.
 package server
 
 import (
@@ -13,14 +16,17 @@ import (
 	"fastpostgres/pkg/engine"
 )
 
-// PostgreSQL Wire Protocol implementation compatible with Go lib/pq driver
+// PostgresServer implements the PostgreSQL wire protocol.
+// It provides a PostgreSQL-compatible server that can accept connections
+// from standard PostgreSQL clients and drivers.
 type PostgresServer struct {
 	db       *engine.Database
 	port     string
 	listener net.Listener
 }
 
-// PostgreSQL message types
+// Message type constants for PostgreSQL wire protocol.
+// These define the message types used in client-server communication.
 const (
 	// Frontend messages
 	MsgStartup     byte = 0
@@ -46,7 +52,8 @@ const (
 	MsgBackendKeyData  byte = 'K'
 )
 
-// Authentication types
+// Authentication type constants for PostgreSQL protocol.
+// These define the various authentication methods supported.
 const (
 	AuthOK                = 0
 	AuthKerberos         = 2
@@ -58,16 +65,18 @@ const (
 	AuthSASL             = 10
 )
 
-// Transaction status
+// Transaction status constants indicate the current transaction state.
 const (
 	TransIdle    = 'I' // Idle
 	TransInTrans = 'T' // In transaction
 	TransError   = 'E' // In failed transaction
 )
 
-// SSL request code
+// SSLRequestCode is the special protocol version number that indicates an SSL request.
 const SSLRequestCode = 80877103
 
+// PostgresConnection represents a single client connection to the server.
+// It maintains connection state, buffers, and authentication information.
 type PostgresConnection struct {
 	conn     net.Conn
 	reader   *bufio.Reader
@@ -80,22 +89,27 @@ type PostgresConnection struct {
 	secretKey int32
 }
 
+// ConnectionInfo holds metadata about a client connection.
 type ConnectionInfo struct {
 	User     string
 	Database string
 	Options  map[string]string
 }
 
+// PostgresMessage represents a protocol message.
 type PostgresMessage struct {
 	Type byte
 	Data []byte
 }
 
+// QueryResult represents the result of a query execution.
 type QueryResult struct {
 	Columns []string
 	Rows    [][]interface{}
 }
 
+// NewPostgresServer creates a new PostgreSQL-compatible server instance.
+// It initializes the server with the given database and port.
 func NewPostgresServer(db *engine.Database, port string) *PostgresServer {
 	return &PostgresServer{
 		db:   db,
@@ -103,6 +117,8 @@ func NewPostgresServer(db *engine.Database, port string) *PostgresServer {
 	}
 }
 
+// Start begins listening for client connections on the configured port.
+// It accepts connections in a loop and spawns a goroutine for each client.
 func (ps *PostgresServer) Start() error {
 	var err error
 	ps.listener, err = net.Listen("tcp", ":"+ps.port)
@@ -123,6 +139,8 @@ func (ps *PostgresServer) Start() error {
 	}
 }
 
+// handleConnection manages a single client connection lifecycle.
+// It handles the startup sequence and message loop.
 func (ps *PostgresServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -195,6 +213,8 @@ func (ps *PostgresServer) handleConnection(conn net.Conn) {
 	}
 }
 
+// handleStartup processes the PostgreSQL startup sequence.
+// It handles SSL negotiation, authentication, and parameter exchange.
 func (ps *PostgresServer) handleStartup(pgConn *PostgresConnection) error {
 	log.Printf("Handling startup sequence")
 
@@ -283,6 +303,8 @@ func (ps *PostgresServer) handleStartup(pgConn *PostgresConnection) error {
 	return nil
 }
 
+// parseStartupParams extracts connection parameters from the startup message.
+// Parameters are encoded as null-terminated key-value pairs.
 func (ps *PostgresServer) parseStartupParams(data []byte) map[string]string {
 	params := make(map[string]string)
 
@@ -322,6 +344,7 @@ func (ps *PostgresServer) parseStartupParams(data []byte) map[string]string {
 	return params
 }
 
+// handleMessage processes a single protocol message from the client.
 func (ps *PostgresServer) handleMessage(pgConn *PostgresConnection, msgType byte, data []byte) error {
 	switch msgType {
 	case MsgQuery:
@@ -334,6 +357,7 @@ func (ps *PostgresServer) handleMessage(pgConn *PostgresConnection, msgType byte
 	}
 }
 
+// handleQuery executes a SQL query and sends the results to the client.
 func (ps *PostgresServer) handleQuery(pgConn *PostgresConnection, sql string) error {
 	log.Printf("Executing query: %s", sql)
 
@@ -372,6 +396,7 @@ func (ps *PostgresServer) handleQuery(pgConn *PostgresConnection, sql string) er
 	return ps.sendReadyForQuery(pgConn, TransIdle)
 }
 
+// sendAuthenticationOK sends an authentication success message to the client.
 func (ps *PostgresServer) sendAuthenticationOK(pgConn *PostgresConnection) error {
 	msg := make([]byte, 9)
 	msg[0] = MsgAuth
@@ -385,6 +410,8 @@ func (ps *PostgresServer) sendAuthenticationOK(pgConn *PostgresConnection) error
 	return pgConn.writer.Flush()
 }
 
+// sendParameterStatus sends server parameter information to the client.
+// This includes server version, encodings, and other configuration.
 func (ps *PostgresServer) sendParameterStatus(pgConn *PostgresConnection) error {
 	params := map[string]string{
 		"server_version": "13.0 (FastPostgres)",
@@ -423,6 +450,7 @@ func (ps *PostgresServer) sendParameterStatus(pgConn *PostgresConnection) error 
 	return pgConn.writer.Flush()
 }
 
+// sendBackendKeyData sends the process ID and secret key for connection cancellation.
 func (ps *PostgresServer) sendBackendKeyData(pgConn *PostgresConnection) error {
 	msg := make([]byte, 13)
 	msg[0] = MsgBackendKeyData
@@ -437,6 +465,7 @@ func (ps *PostgresServer) sendBackendKeyData(pgConn *PostgresConnection) error {
 	return pgConn.writer.Flush()
 }
 
+// sendReadyForQuery indicates the server is ready to accept a new query.
 func (ps *PostgresServer) sendReadyForQuery(pgConn *PostgresConnection, status byte) error {
 	msg := []byte{MsgReadyForQuery, 0, 0, 0, 5, status}
 	_, err := pgConn.writer.Write(msg)
@@ -446,6 +475,7 @@ func (ps *PostgresServer) sendReadyForQuery(pgConn *PostgresConnection, status b
 	return pgConn.writer.Flush()
 }
 
+// sendErrorResponse sends an error message to the client.
 func (ps *PostgresServer) sendErrorResponse(pgConn *PostgresConnection, severity, message string) error {
 	severityField := []byte{'S'}
 	severityField = append(severityField, []byte(severity)...)
@@ -471,6 +501,7 @@ func (ps *PostgresServer) sendErrorResponse(pgConn *PostgresConnection, severity
 	return pgConn.writer.Flush()
 }
 
+// sendEmptyQueryResponse handles the case when an empty query is received.
 func (ps *PostgresServer) sendEmptyQueryResponse(pgConn *PostgresConnection) error {
 	msg := []byte{MsgCmdComplete, 0, 0, 0, 4}
 	_, err := pgConn.writer.Write(msg)
@@ -480,6 +511,8 @@ func (ps *PostgresServer) sendEmptyQueryResponse(pgConn *PostgresConnection) err
 	return pgConn.writer.Flush()
 }
 
+// sendQueryResult sends query results to the client.
+// It sends row descriptions, data rows, and a completion message.
 func (ps *PostgresServer) sendQueryResult(pgConn *PostgresConnection, result *engine.QueryResult) error {
 	// Send row description
 	if len(result.Columns) > 0 {
@@ -500,6 +533,7 @@ func (ps *PostgresServer) sendQueryResult(pgConn *PostgresConnection, result *en
 	return ps.sendCommandComplete(pgConn, tag)
 }
 
+// sendRowDescription sends metadata about the result columns.
 func (ps *PostgresServer) sendRowDescription(pgConn *PostgresConnection, columns []string) error {
 	msgData := make([]byte, 2) // field count
 	binary.BigEndian.PutUint16(msgData, uint16(len(columns)))
@@ -533,6 +567,7 @@ func (ps *PostgresServer) sendRowDescription(pgConn *PostgresConnection, columns
 	return pgConn.writer.Flush()
 }
 
+// sendDataRow sends a single row of query results.
 func (ps *PostgresServer) sendDataRow(pgConn *PostgresConnection, row []interface{}) error {
 	msgData := make([]byte, 2) // field count
 	binary.BigEndian.PutUint16(msgData, uint16(len(row)))
@@ -562,6 +597,7 @@ func (ps *PostgresServer) sendDataRow(pgConn *PostgresConnection, row []interfac
 	return pgConn.writer.Flush()
 }
 
+// sendCommandComplete indicates successful completion of a command.
 func (ps *PostgresServer) sendCommandComplete(pgConn *PostgresConnection, tag string) error {
 	tagBytes := []byte(tag)
 	msgData := append(tagBytes, 0) // null terminator

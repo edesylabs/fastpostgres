@@ -1,3 +1,5 @@
+// Package engine provides high-performance connection pooling.
+// It supports 100K+ concurrent connections with multiplexing and load balancing.
 package engine
 
 import (
@@ -9,7 +11,8 @@ import (
 	"time"
 )
 
-// ConnectionPool manages 100K+ concurrent connections efficiently
+// ConnectionPool manages large numbers of concurrent connections efficiently.
+// It uses connection multiplexing and dynamic scaling to handle 100K+ connections.
 type ConnectionPool struct {
 	// Core pool management
 	activeConnections  sync.Map // map[string]*PooledConnection
@@ -41,6 +44,7 @@ type ConnectionPool struct {
 	wg                 sync.WaitGroup
 }
 
+// ConnectionPoolConfig configures connection pool behavior.
 type ConnectionPoolConfig struct {
 	MaxConnections      int64         // Target: 100K+
 	MultiplexerCount    int           // Number of I/O multiplexers
@@ -53,7 +57,7 @@ type ConnectionPoolConfig struct {
 	LoadBalanceStrategy string        // "round_robin", "least_connections", "cpu_affinity"
 }
 
-// PooledConnection represents a lightweight connection wrapper
+// PooledConnection wraps a network connection with pooling metadata.
 type PooledConnection struct {
 	// Connection identity
 	ID             string
@@ -88,6 +92,7 @@ type PooledConnection struct {
 	cancel         context.CancelFunc
 }
 
+// ConnectionState represents the current state of a connection.
 type ConnectionState uint32
 
 const (
