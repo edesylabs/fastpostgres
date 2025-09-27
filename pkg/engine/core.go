@@ -65,14 +65,17 @@ const (
 
 // Database is the main database engine managing tables and connections.
 type Database struct {
-	Name           string
-	Tables         sync.Map // map[string]*Table
-	Connections    sync.Map // map[string]*Connection
-	IndexManager   interface{} // *storage.IndexManager - interface to avoid circular import
-	QueryCache     *QueryCache
-	BufferPool     *BufferPool
-	TransactionMgr *TransactionManager
-	Stats          *Statistics
+	Name              string
+	Tables            sync.Map // map[string]*Table
+	Connections       sync.Map // map[string]*Connection
+	IndexManager      interface{} // *storage.IndexManager - interface to avoid circular import
+	QueryCache        *QueryCache
+	BufferPool        *BufferPool
+	TransactionMgr    *TransactionManager
+	Stats             *Statistics
+	WAL               interface{} // *storage.WAL
+	DiskStorage       interface{} // *storage.DiskStorage
+	CheckpointManager interface{} // *storage.CheckpointManager
 }
 
 // QueryPlan represents a parsed and optimized query execution plan.

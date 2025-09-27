@@ -1,5 +1,6 @@
 # Binaries
 fastpostgres
+bin/
 *.exe
 *.exe~
 *.dll
@@ -11,9 +12,35 @@ fastpostgres
 
 # Output of the go coverage tool
 *.out
+coverage.html
 
 # Go workspace file
 go.work
+
+# Data directories (persistence)
+data/
+*.db
+*.dat
+
+# Log files
+*.log
+/tmp/
+logs/
+test_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.bak
+*.backup
+
+# Configuration files (may contain secrets)
+config.local.yml
+config.local.json
+*.local.*
 
 # IDE
 .vscode/
@@ -25,3 +52,6 @@ go.work
 # OS
 .DS_Store
 Thumbs.db
+
+# Dependency directories
+vendor/
