@@ -415,13 +415,20 @@ func (ps *PostgresServer) handleQuery(pgConn *PostgresConnection, sql string) er
 	// Handle different query types
 	switch plan.Type {
 	case engine.QuerySelect:
-		// Get the table
-		tableInterface, exists := ps.db.Tables.Load(plan.TableName)
-		if !exists {
-			return ps.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("Table not found: %s", plan.TableName))
-		}
+		var table *engine.Table
 
-		table := tableInterface.(*engine.Table)
+		// Handle literal-only queries (e.g., SELECT 1;)
+		if plan.TableName == "" {
+			// Create a dummy table for literal-only queries
+			table = nil
+		} else {
+			// Get the table
+			tableInterface, exists := ps.db.Tables.Load(plan.TableName)
+			if !exists {
+				return ps.sendErrorResponse(pgConn, "ERROR", fmt.Sprintf("Table not found: %s", plan.TableName))
+			}
+			table = tableInterface.(*engine.Table)
+		}
 
 		// Execute the query using VectorizedEngine
 		var result *engine.QueryResult

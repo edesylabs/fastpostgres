@@ -5,6 +5,7 @@ package query
 import (
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"unsafe"
@@ -78,6 +79,12 @@ func (ve *VectorizedEngine) ExecuteSelect(plan *engine.QueryPlan, table *engine.
 	if plan.HasAggregates() {
 		return ve.ExecuteAggregateQuery(plan, table)
 	}
+
+	// Handle literal-only queries (e.g., SELECT 1;)
+	if table == nil {
+		return ve.ExecuteLiteralOnlyQuery(plan)
+	}
+
 	var selectedCols []*engine.Column
 	var columnNames []string
 
@@ -94,9 +101,16 @@ func (ve *VectorizedEngine) ExecuteSelect(plan *engine.QueryPlan, table *engine.
 		for i, colName := range plan.Columns {
 			col := table.GetColumn(colName)
 			if col == nil {
-				return nil, fmt.Errorf("column %s not found", colName)
+				// Check if this is a literal value (number or string)
+				if isLiteralValue(colName) {
+					// For literals, we'll create a virtual column
+					selectedCols[i] = nil // Mark as literal
+				} else {
+					return nil, fmt.Errorf("column %s not found", colName)
+				}
+			} else {
+				selectedCols[i] = col
 			}
-			selectedCols[i] = col
 		}
 	}
 
@@ -107,7 +121,19 @@ func (ve *VectorizedEngine) ExecuteSelect(plan *engine.QueryPlan, table *engine.
 	}
 
 	for i, col := range selectedCols {
-		result.Types[i] = col.Type
+		if col != nil {
+			result.Types[i] = col.Type
+		} else {
+			// For literal values, determine type based on the value
+			literal := plan.Columns[i]
+			if _, err := strconv.ParseInt(literal, 10, 64); err == nil {
+				result.Types[i] = engine.TypeInt64
+			} else if _, err := strconv.ParseFloat(literal, 64); err == nil {
+				result.Types[i] = engine.TypeFloat64
+			} else {
+				result.Types[i] = engine.TypeString
+			}
+		}
 	}
 
 	if ve.useParallel && table.RowCount > 10000 {
@@ -844,4 +870,70 @@ type GroupInfo struct {
 	Sums   map[string]int64
 	Mins   map[string]int64
 	Maxs   map[string]int64
+}
+
+// isLiteralValue checks if a column name is actually a literal value (number or string)
+func isLiteralValue(colName string) bool {
+	// Check if it's a number
+	if _, err := strconv.ParseFloat(colName, 64); err == nil {
+		return true
+	}
+
+	// Check if it's a quoted string
+	if len(colName) >= 2 && colName[0] == '\'' && colName[len(colName)-1] == '\'' {
+		return true
+	}
+
+	return false
+}
+
+// getLiteralValue converts a literal string to its typed value
+func getLiteralValue(literal string) interface{} {
+	// Try parsing as number first
+	if val, err := strconv.ParseInt(literal, 10, 64); err == nil {
+		return val
+	}
+
+	if val, err := strconv.ParseFloat(literal, 64); err == nil {
+		return val
+	}
+
+	// Handle quoted strings
+	if len(literal) >= 2 && literal[0] == '\'' && literal[len(literal)-1] == '\'' {
+		return literal[1 : len(literal)-1] // Remove quotes
+	}
+
+	// Return as string if nothing else matches
+	return literal
+}
+
+// ExecuteLiteralOnlyQuery handles queries like SELECT 1; that don't involve tables
+func (ve *VectorizedEngine) ExecuteLiteralOnlyQuery(plan *engine.QueryPlan) (*engine.QueryResult, error) {
+	result := &engine.QueryResult{
+		Columns: plan.Columns,
+		Types:   make([]engine.DataType, len(plan.Columns)),
+		Rows:    make([][]interface{}, 1), // One row for literal values
+	}
+
+	// Create the single row with literal values
+	row := make([]interface{}, len(plan.Columns))
+	for i, literal := range plan.Columns {
+		// Determine type and value
+		if _, err := strconv.ParseInt(literal, 10, 64); err == nil {
+			result.Types[i] = engine.TypeInt64
+			row[i], _ = strconv.ParseInt(literal, 10, 64)
+		} else if _, err := strconv.ParseFloat(literal, 64); err == nil {
+			result.Types[i] = engine.TypeFloat64
+			row[i], _ = strconv.ParseFloat(literal, 64)
+		} else if len(literal) >= 2 && literal[0] == '\'' && literal[len(literal)-1] == '\'' {
+			result.Types[i] = engine.TypeString
+			row[i] = literal[1 : len(literal)-1] // Remove quotes
+		} else {
+			result.Types[i] = engine.TypeString
+			row[i] = literal
+		}
+	}
+
+	result.Rows[0] = row
+	return result, nil
 }

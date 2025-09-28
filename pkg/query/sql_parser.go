@@ -299,17 +299,31 @@ func (tp *tokenParser) parseSelect() (*engine.QueryPlan, error) {
 	}
 	plan.Columns = columns
 
-	// FROM
-	if !tp.consume(TokenFrom) {
-		return nil, fmt.Errorf("expected FROM")
-	}
+	// FROM (optional for literal-only queries)
+	if tp.current().Type == TokenFrom {
+		tp.advance()
 
-	// Table name
-	if tp.current().Type != TokenIdentifier {
-		return nil, fmt.Errorf("expected table name")
+		// Table name
+		if tp.current().Type != TokenIdentifier {
+			return nil, fmt.Errorf("expected table name")
+		}
+		plan.TableName = strings.ToLower(tp.current().Value)
+		tp.advance()
+	} else {
+		// Check if all columns are literals - if not, FROM is required
+		allLiterals := true
+		for _, col := range columns {
+			if col != "*" && !isLiteralValueInParser(col) {
+				allLiterals = false
+				break
+			}
+		}
+		if !allLiterals {
+			return nil, fmt.Errorf("expected FROM clause for non-literal columns")
+		}
+		// For literal-only queries, no table name is needed
+		plan.TableName = ""
 	}
-	plan.TableName = strings.ToLower(tp.current().Value)
-	tp.advance()
 
 	// Optional JOIN clause
 	joins, err := tp.parseJoins()
@@ -389,8 +403,16 @@ func (tp *tokenParser) parseColumnList() ([]string, error) {
 				columns = append(columns, strings.ToLower(tp.current().Value))
 				tp.advance()
 			}
+		} else if tp.current().Type == TokenNumber {
+			// Number literal (e.g., SELECT 1;)
+			columns = append(columns, tp.current().Value)
+			tp.advance()
+		} else if tp.current().Type == TokenString {
+			// String literal (e.g., SELECT 'hello';)
+			columns = append(columns, "'"+tp.current().Value+"'")
+			tp.advance()
 		} else {
-			return nil, fmt.Errorf("expected column name or function")
+			return nil, fmt.Errorf("expected column name, function, number, or string literal")
 		}
 
 		if tp.current().Type != TokenComma {
@@ -780,4 +802,19 @@ func (qo *QueryOptimizer) optimizeJoinOrder(plan *engine.QueryPlan) {
 
 func (qo *QueryOptimizer) selectIndexes(plan *engine.QueryPlan) {
 	// Choose the most selective indexes for filtering
+}
+
+// isLiteralValueInParser checks if a column name is actually a literal value (for parser)
+func isLiteralValueInParser(colName string) bool {
+	// Check if it's a number
+	if _, err := strconv.ParseFloat(colName, 64); err == nil {
+		return true
+	}
+
+	// Check if it's a quoted string
+	if len(colName) >= 2 && colName[0] == '\'' && colName[len(colName)-1] == '\'' {
+		return true
+	}
+
+	return false
 }
