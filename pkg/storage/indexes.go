@@ -12,8 +12,10 @@ import (
 
 // IndexManager manages multiple indexes across tables.
 type IndexManager struct {
-	indexes map[string]*IndexStructure
-	mu      sync.RWMutex
+	indexes    map[string]*IndexStructure
+	lsmIndexes map[string]*LSMIndex    // LSM-Tree indexes for write-heavy workloads
+	bitmapIndexes map[string]*BitmapIndex // Bitmap indexes for categorical data
+	mu         sync.RWMutex
 }
 
 // IndexStructure represents a single index with its implementation.
@@ -91,7 +93,9 @@ type indexEntry struct {
 // NewIndexManager creates a new index manager.
 func NewIndexManager() *IndexManager {
 	return &IndexManager{
-		indexes: make(map[string]*IndexStructure),
+		indexes:       make(map[string]*IndexStructure),
+		lsmIndexes:    make(map[string]*LSMIndex),
+		bitmapIndexes: make(map[string]*BitmapIndex),
 	}
 }
 
@@ -119,6 +123,18 @@ func (im *IndexManager) CreateIndex(name, table, column string, indexType engine
 		idx.hash = NewHashIndexStruct()
 	case engine.BitmapIndex:
 		idx.bitmap = NewBitmapIndexStruct()
+	case engine.LSMTreeIndex:
+		// Create LSM-Tree index for write-heavy workloads
+		lsmDir := fmt.Sprintf("./data/indexes/lsm_%s_%s", table, column)
+		lsmIndex, err := NewLSMIndex(name, lsmDir)
+		if err != nil {
+			return fmt.Errorf("failed to create LSM index: %w", err)
+		}
+		im.lsmIndexes[name] = lsmIndex
+	case engine.RoaringBitmapIndex:
+		// Create advanced bitmap index with roaring bitmap compression
+		bitmapIndex := NewBitmapIndex(name, column)
+		im.bitmapIndexes[name] = bitmapIndex
 	default:
 		return fmt.Errorf("unsupported index type: %v", indexType)
 	}
@@ -161,6 +177,10 @@ func (im *IndexManager) BuildIndex(table *engine.Table, indexName string) error 
 		return buildHashIndexStruct(idx.hash, col)
 	case engine.BitmapIndex:
 		return buildBitmapIndexStruct(idx.bitmap, col)
+	case engine.LSMTreeIndex:
+		return im.buildLSMIndex(indexName, col)
+	case engine.RoaringBitmapIndex:
+		return im.buildRoaringBitmapIndex(indexName, col)
 	default:
 		return fmt.Errorf("unsupported index type")
 	}
@@ -554,4 +574,249 @@ func getMaxValue(value interface{}) interface{} {
 		return string(rune(0x10FFFF)) // Max Unicode
 	}
 	return value
+}
+
+// buildLSMIndex builds an LSM-Tree index from column data
+func (im *IndexManager) buildLSMIndex(indexName string, col *engine.Column) error {
+	lsmIndex, exists := im.lsmIndexes[indexName]
+	if !exists {
+		return fmt.Errorf("LSM index %s not found", indexName)
+	}
+
+	switch col.Type {
+	case engine.TypeInt64:
+		data := (*[]int64)(col.Data)
+		for i, val := range *data {
+			if !col.Nulls[i] {
+				key := fmt.Sprintf("%d", val)
+				value := fmt.Sprintf("%d", i) // Store row ID as value
+				if err := lsmIndex.Put([]byte(key), []byte(value)); err != nil {
+					return fmt.Errorf("failed to insert into LSM index: %w", err)
+				}
+			}
+		}
+	case engine.TypeString:
+		data := (*[]string)(col.Data)
+		for i, val := range *data {
+			if !col.Nulls[i] {
+				value := fmt.Sprintf("%d", i) // Store row ID as value
+				if err := lsmIndex.Put([]byte(val), []byte(value)); err != nil {
+					return fmt.Errorf("failed to insert into LSM index: %w", err)
+				}
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported column type for LSM index")
+	}
+
+	return nil
+}
+
+// buildRoaringBitmapIndex builds a roaring bitmap index from column data
+func (im *IndexManager) buildRoaringBitmapIndex(indexName string, col *engine.Column) error {
+	bitmapIndex, exists := im.bitmapIndexes[indexName]
+	if !exists {
+		return fmt.Errorf("bitmap index %s not found", indexName)
+	}
+
+	switch col.Type {
+	case engine.TypeInt64:
+		data := (*[]int64)(col.Data)
+		for i, val := range *data {
+			if !col.Nulls[i] {
+				bitmapIndex.Add(uint64(i), val)
+			}
+		}
+	case engine.TypeString:
+		data := (*[]string)(col.Data)
+		for i, val := range *data {
+			if !col.Nulls[i] {
+				bitmapIndex.Add(uint64(i), val)
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported column type for bitmap index")
+	}
+
+	return nil
+}
+
+// QueryIndex performs a query on any index type and returns matching row IDs
+func (im *IndexManager) QueryIndex(indexName string, query IndexQuery) ([]int, error) {
+	im.mu.RLock()
+	defer im.mu.RUnlock()
+
+	// Check traditional indexes first
+	if idx, exists := im.indexes[indexName]; exists {
+		return im.queryTraditionalIndex(idx, query)
+	}
+
+	// Check LSM indexes
+	if lsmIndex, exists := im.lsmIndexes[indexName]; exists {
+		return im.queryLSMIndex(lsmIndex, query)
+	}
+
+	// Check bitmap indexes
+	if bitmapIndex, exists := im.bitmapIndexes[indexName]; exists {
+		return im.queryBitmapIndex(bitmapIndex, query)
+	}
+
+	return nil, fmt.Errorf("index %s not found", indexName)
+}
+
+// IndexQuery represents a query on an index
+type IndexQuery struct {
+	Type     QueryType
+	Value    interface{}
+	MinValue interface{}
+	MaxValue interface{}
+	Values   []interface{}
+}
+
+type QueryType uint8
+
+const (
+	QueryEqual QueryType = iota
+	QueryRange
+	QueryIn
+	QueryExists
+)
+
+// queryTraditionalIndex queries B-Tree, Hash, or simple Bitmap indexes
+func (im *IndexManager) queryTraditionalIndex(idx *IndexStructure, query IndexQuery) ([]int, error) {
+	switch idx.Type {
+	case engine.BTreeIndex:
+		if query.Type == QueryEqual {
+			return idx.btree.Search(query.Value), nil
+		} else if query.Type == QueryRange {
+			return idx.btree.RangeSearch(query.MinValue, query.MaxValue), nil
+		}
+	case engine.HashIndex:
+		if query.Type == QueryEqual {
+			return idx.hash.Search(query.Value), nil
+		}
+	case engine.BitmapIndex:
+		if query.Type == QueryEqual {
+			return idx.bitmap.Search(query.Value), nil
+		}
+	}
+	return nil, fmt.Errorf("unsupported query type for index")
+}
+
+// queryLSMIndex queries an LSM-Tree index
+func (im *IndexManager) queryLSMIndex(lsmIndex *LSMIndex, query IndexQuery) ([]int, error) {
+	switch query.Type {
+	case QueryEqual:
+		key := fmt.Sprintf("%v", query.Value)
+		value, found, err := lsmIndex.Get([]byte(key))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, nil
+		}
+
+		// Parse row ID from value
+		rowID := 0
+		if _, err := fmt.Sscanf(string(value), "%d", &rowID); err != nil {
+			return nil, fmt.Errorf("failed to parse row ID: %w", err)
+		}
+
+		return []int{rowID}, nil
+
+	case QueryRange:
+		minKey := fmt.Sprintf("%v", query.MinValue)
+		maxKey := fmt.Sprintf("%v", query.MaxValue)
+
+		results, err := lsmIndex.RangeScan([]byte(minKey), []byte(maxKey), 1000) // Limit to 1000 results
+		if err != nil {
+			return nil, err
+		}
+
+		var rowIDs []int
+		for _, kv := range results {
+			rowID := 0
+			if _, err := fmt.Sscanf(string(kv.Value), "%d", &rowID); err == nil {
+				rowIDs = append(rowIDs, rowID)
+			}
+		}
+
+		return rowIDs, nil
+	}
+
+	return nil, fmt.Errorf("unsupported query type for LSM index")
+}
+
+// queryBitmapIndex queries a roaring bitmap index
+func (im *IndexManager) queryBitmapIndex(bitmapIndex *BitmapIndex, query IndexQuery) ([]int, error) {
+	switch query.Type {
+	case QueryEqual:
+		bitmap := bitmapIndex.Query(query.Value)
+		return convertUint64SliceToIntSlice(bitmap.ToArray()), nil
+
+	case QueryRange:
+		bitmap := bitmapIndex.QueryRange(query.MinValue, query.MaxValue)
+		return convertUint64SliceToIntSlice(bitmap.ToArray()), nil
+
+	case QueryIn:
+		bitmap := bitmapIndex.QueryIn(query.Values)
+		return convertUint64SliceToIntSlice(bitmap.ToArray()), nil
+	}
+
+	return nil, fmt.Errorf("unsupported query type for bitmap index")
+}
+
+// convertUint64SliceToIntSlice converts []uint64 to []int
+func convertUint64SliceToIntSlice(input []uint64) []int {
+	result := make([]int, len(input))
+	for i, v := range input {
+		result[i] = int(v)
+	}
+	return result
+}
+
+// GetIndexStats returns statistics for all index types
+func (im *IndexManager) GetIndexStats() map[string]interface{} {
+	im.mu.RLock()
+	defer im.mu.RUnlock()
+
+	stats := make(map[string]interface{})
+
+	// Traditional index stats
+	stats["traditional_indexes"] = len(im.indexes)
+
+	// LSM index stats
+	lsmStats := make(map[string]interface{})
+	for name, lsmIndex := range im.lsmIndexes {
+		// Add LSM-specific stats here
+		lsmStats[name] = map[string]interface{}{
+			"type": "LSM-Tree",
+			"row_count": lsmIndex.GetRowCount(),
+		}
+	}
+	stats["lsm_indexes"] = lsmStats
+
+	// Bitmap index stats
+	bitmapStats := make(map[string]interface{})
+	for name, bitmapIndex := range im.bitmapIndexes {
+		bitmapStats[name] = bitmapIndex.Stats()
+	}
+	stats["bitmap_indexes"] = bitmapStats
+
+	return stats
+}
+
+// Close closes all indexes and releases resources
+func (im *IndexManager) Close() error {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	// Close all LSM indexes
+	for _, lsmIndex := range im.lsmIndexes {
+		if err := lsmIndex.Close(); err != nil {
+			return fmt.Errorf("failed to close LSM index: %w", err)
+		}
+	}
+
+	return nil
 }

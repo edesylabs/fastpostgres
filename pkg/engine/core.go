@@ -71,6 +71,8 @@ const (
 	HashIndex
 	BitmapIndex
 	BloomFilter
+	LSMTreeIndex      // LSM-Tree for write-heavy workloads
+	RoaringBitmapIndex // Advanced bitmap index with compression
 )
 
 // Database is the main database engine managing tables and connections.
