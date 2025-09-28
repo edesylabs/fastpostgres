@@ -37,13 +37,19 @@ type Column struct {
 	mu       sync.RWMutex
 }
 
-// Table represents a table with columnar storage.
+// Table represents a table with columnar storage and MVCC support.
 type Table struct {
 	Name      string
 	Columns   []*Column
 	RowCount  uint64
 	Indexes   map[string]*Index
 	Database  *Database  // Reference to parent database for WAL access
+
+	// MVCC Support
+	MVCCRows     map[uint64]*MVCCRow // Row ID -> MVCC Row
+	NextRowID    uint64              // Next available row ID
+	MVCCManager  *MVCCManager        // MVCC transaction manager
+
 	mu        sync.RWMutex
 }
 
@@ -76,6 +82,7 @@ type Database struct {
 	QueryCache        *QueryCache
 	BufferPool        *BufferPool
 	TransactionMgr    *TransactionManager
+	MVCCManager       *MVCCManager // MVCC transaction manager
 	Stats             *Statistics
 	WAL               interface{} // *storage.WAL
 	DiskStorage       interface{} // *storage.DiskStorage
@@ -260,6 +267,7 @@ type Connection struct {
 	RemoteAddr  string
 	Database    string
 	Transaction *Transaction
+	MVCCTxn     *MVCCTransaction // MVCC transaction for this connection
 	LastActivity time.Time
 }
 
@@ -271,6 +279,7 @@ func NewDatabase(name string) *Database {
 		QueryCache:     NewQueryCache(1000),
 		BufferPool:     NewBufferPool(4096, 10000),
 		TransactionMgr: NewTransactionManager(),
+		MVCCManager:    NewMVCCManager(),
 		Stats:          &Statistics{},
 	}
 }
@@ -419,11 +428,19 @@ func NewTable(name string) *Table {
 
 // NewTableWithDB creates a new table with database reference
 func NewTableWithDB(name string, db *Database) *Table {
+	var mvccMgr *MVCCManager
+	if db != nil {
+		mvccMgr = db.MVCCManager
+	}
+
 	return &Table{
-		Name:     name,
-		Columns:  make([]*Column, 0),
-		Indexes:  make(map[string]*Index),
-		Database: db,
+		Name:        name,
+		Columns:     make([]*Column, 0),
+		Indexes:     make(map[string]*Index),
+		Database:    db,
+		MVCCRows:    make(map[uint64]*MVCCRow),
+		NextRowID:   1,
+		MVCCManager: mvccMgr,
 	}
 }
 
@@ -446,7 +463,13 @@ func (t *Table) GetColumn(name string) *Column {
 	return nil
 }
 
+// InsertRow inserts a new row with MVCC support
 func (t *Table) InsertRow(values map[string]interface{}) error {
+	return t.InsertRowWithTransaction(nil, values)
+}
+
+// InsertRowWithTransaction inserts a new row within a transaction
+func (t *Table) InsertRowWithTransaction(txn *MVCCTransaction, values map[string]interface{}) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -457,6 +480,50 @@ func (t *Table) InsertRow(values map[string]interface{}) error {
 		}
 	}
 
+	// Get next row ID
+	rowID := atomic.AddUint64(&t.NextRowID, 1)
+
+	// For non-MVCC mode (backward compatibility)
+	if t.MVCCManager == nil {
+		return t.insertRowLegacy(values)
+	}
+
+	// MVCC mode: Create new MVCC row
+	mvccRow := &MVCCRow{
+		RowID: rowID,
+	}
+
+	// Use provided transaction or create a default one
+	var currentTxn *MVCCTransaction
+	if txn != nil {
+		currentTxn = txn
+	} else {
+		// Auto-commit transaction for backward compatibility
+		currentTxn = t.MVCCManager.BeginTransaction()
+		defer func() {
+			if err := t.MVCCManager.CommitTransaction(currentTxn); err != nil {
+				t.MVCCManager.AbortTransaction(currentTxn)
+			}
+		}()
+	}
+
+	// Create row version
+	if err := t.MVCCManager.WriteRow(currentTxn, mvccRow, values); err != nil {
+		return fmt.Errorf("failed to write MVCC row: %w", err)
+	}
+
+	// Store in table
+	t.MVCCRows[rowID] = mvccRow
+
+	// Also update columnar storage for compatibility
+	t.insertRowLegacy(values)
+
+	atomic.AddUint64(&t.RowCount, 1)
+	return nil
+}
+
+// insertRowLegacy handles the original columnar storage format
+func (t *Table) insertRowLegacy(values map[string]interface{}) error {
 	for _, col := range t.Columns {
 		value, exists := values[col.Name]
 		isNull := !exists || value == nil
@@ -484,8 +551,6 @@ func (t *Table) InsertRow(values map[string]interface{}) error {
 			}
 		}
 	}
-
-	atomic.AddUint64(&t.RowCount, 1)
 	return nil
 }
 
@@ -616,6 +681,274 @@ type TableSchema struct {
 type ColumnDef struct {
 	Name string
 	Type DataType
+}
+
+// UpdateRow updates existing rows that match the filter with MVCC support
+func (t *Table) UpdateRow(filter *FilterExpression, updates map[string]interface{}) (int64, error) {
+	return t.UpdateRowWithTransaction(nil, filter, updates)
+}
+
+// UpdateRowWithTransaction updates rows within a transaction
+func (t *Table) UpdateRowWithTransaction(txn *MVCCTransaction, filter *FilterExpression, updates map[string]interface{}) (int64, error) {
+	if t.MVCCManager == nil {
+		return 0, fmt.Errorf("MVCC not enabled for this table")
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Use provided transaction or create a default one
+	var currentTxn *MVCCTransaction
+	if txn != nil {
+		currentTxn = txn
+	} else {
+		// Auto-commit transaction
+		currentTxn = t.MVCCManager.BeginTransaction()
+		defer func() {
+			if err := t.MVCCManager.CommitTransaction(currentTxn); err != nil {
+				t.MVCCManager.AbortTransaction(currentTxn)
+			}
+		}()
+	}
+
+	updatedCount := int64(0)
+
+	// Iterate through all MVCC rows
+	for _, mvccRow := range t.MVCCRows {
+		// Read current version
+		currentData, exists := t.MVCCManager.ReadRow(currentTxn, mvccRow)
+		if !exists {
+			continue // Row not visible or deleted
+		}
+
+		// Check if row matches filter
+		if filter != nil && !t.evaluateFilter(currentData, filter) {
+			continue
+		}
+
+		// Write WAL record for UPDATE
+		if t.Database != nil && t.Database.WAL != nil {
+			updateData := map[string]interface{}{
+				"row_id":  mvccRow.RowID,
+				"old_data": currentData,
+				"new_data": updates,
+			}
+			if err := t.writeUpdateWAL(updateData); err != nil {
+				return 0, fmt.Errorf("failed to write UPDATE WAL record: %w", err)
+			}
+		}
+
+		// Create new data by merging updates
+		newData := make(map[string]interface{})
+		for k, v := range currentData {
+			newData[k] = v
+		}
+		for k, v := range updates {
+			newData[k] = v
+		}
+
+		// Create new version
+		if err := t.MVCCManager.WriteRow(currentTxn, mvccRow, newData); err != nil {
+			return 0, fmt.Errorf("failed to create new version: %w", err)
+		}
+
+		updatedCount++
+	}
+
+	return updatedCount, nil
+}
+
+// DeleteRow deletes rows that match the filter with MVCC support
+func (t *Table) DeleteRow(filter *FilterExpression) (int64, error) {
+	return t.DeleteRowWithTransaction(nil, filter)
+}
+
+// DeleteRowWithTransaction deletes rows within a transaction
+func (t *Table) DeleteRowWithTransaction(txn *MVCCTransaction, filter *FilterExpression) (int64, error) {
+	if t.MVCCManager == nil {
+		return 0, fmt.Errorf("MVCC not enabled for this table")
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Use provided transaction or create a default one
+	var currentTxn *MVCCTransaction
+	if txn != nil {
+		currentTxn = txn
+	} else {
+		// Auto-commit transaction
+		currentTxn = t.MVCCManager.BeginTransaction()
+		defer func() {
+			if err := t.MVCCManager.CommitTransaction(currentTxn); err != nil {
+				t.MVCCManager.AbortTransaction(currentTxn)
+			}
+		}()
+	}
+
+	deletedCount := int64(0)
+
+	// Iterate through all MVCC rows
+	for _, mvccRow := range t.MVCCRows {
+		// Read current version
+		currentData, exists := t.MVCCManager.ReadRow(currentTxn, mvccRow)
+		if !exists {
+			continue // Row not visible or already deleted
+		}
+
+		// Check if row matches filter
+		if filter != nil && !t.evaluateFilter(currentData, filter) {
+			continue
+		}
+
+		// Write WAL record for DELETE
+		if t.Database != nil && t.Database.WAL != nil {
+			deleteData := map[string]interface{}{
+				"row_id": mvccRow.RowID,
+				"data":   currentData,
+			}
+			if err := t.writeDeleteWAL(deleteData); err != nil {
+				return 0, fmt.Errorf("failed to write DELETE WAL record: %w", err)
+			}
+		}
+
+		// Mark row as deleted
+		if err := t.MVCCManager.DeleteRow(currentTxn, mvccRow); err != nil {
+			return 0, fmt.Errorf("failed to delete row: %w", err)
+		}
+
+		deletedCount++
+	}
+
+	return deletedCount, nil
+}
+
+// evaluateFilter checks if a row matches a filter condition
+func (t *Table) evaluateFilter(data map[string]interface{}, filter *FilterExpression) bool {
+	value, exists := data[filter.Column]
+	if !exists {
+		return false
+	}
+
+	switch filter.Operator {
+	case OpEqual:
+		return value == filter.Value
+	case OpNotEqual:
+		return value != filter.Value
+	case OpLess:
+		if v1, ok := value.(int64); ok {
+			if v2, ok := filter.Value.(int64); ok {
+				return v1 < v2
+			}
+		}
+	case OpLessEqual:
+		if v1, ok := value.(int64); ok {
+			if v2, ok := filter.Value.(int64); ok {
+				return v1 <= v2
+			}
+		}
+	case OpGreater:
+		if v1, ok := value.(int64); ok {
+			if v2, ok := filter.Value.(int64); ok {
+				return v1 > v2
+			}
+		}
+	case OpGreaterEqual:
+		if v1, ok := value.(int64); ok {
+			if v2, ok := filter.Value.(int64); ok {
+				return v1 >= v2
+			}
+		}
+	}
+	return false
+}
+
+// writeUpdateWAL writes an UPDATE operation to WAL
+func (t *Table) writeUpdateWAL(updateData map[string]interface{}) error {
+	data, err := json.Marshal(updateData)
+	if err != nil {
+		return fmt.Errorf("failed to serialize update data: %w", err)
+	}
+
+	record := map[string]interface{}{
+		"Type":      uint8(1), // WALRecordUpdate = 1
+		"TableName": t.Name,
+		"Data":      data,
+	}
+
+	return t.callWALWriteRecord(t.Database.WAL, record)
+}
+
+// writeDeleteWAL writes a DELETE operation to WAL
+func (t *Table) writeDeleteWAL(deleteData map[string]interface{}) error {
+	data, err := json.Marshal(deleteData)
+	if err != nil {
+		return fmt.Errorf("failed to serialize delete data: %w", err)
+	}
+
+	record := map[string]interface{}{
+		"Type":      uint8(2), // WALRecordDelete = 2
+		"TableName": t.Name,
+		"Data":      data,
+	}
+
+	return t.callWALWriteRecord(t.Database.WAL, record)
+}
+
+// Transaction Control Methods
+
+// BeginTransaction starts a new MVCC transaction for a connection
+func (db *Database) BeginTransaction(conn *Connection) error {
+	if conn.MVCCTxn != nil && conn.MVCCTxn.State == TxActive {
+		return fmt.Errorf("transaction already active")
+	}
+
+	if db.MVCCManager == nil {
+		return fmt.Errorf("MVCC not enabled")
+	}
+
+	conn.MVCCTxn = db.MVCCManager.BeginTransaction()
+	return nil
+}
+
+// CommitTransaction commits the current transaction for a connection
+func (db *Database) CommitTransaction(conn *Connection) error {
+	if conn.MVCCTxn == nil || conn.MVCCTxn.State != TxActive {
+		return fmt.Errorf("no active transaction")
+	}
+
+	if db.MVCCManager == nil {
+		return fmt.Errorf("MVCC not enabled")
+	}
+
+	err := db.MVCCManager.CommitTransaction(conn.MVCCTxn)
+	conn.MVCCTxn = nil
+	return err
+}
+
+// RollbackTransaction aborts the current transaction for a connection
+func (db *Database) RollbackTransaction(conn *Connection) error {
+	if conn.MVCCTxn == nil || conn.MVCCTxn.State != TxActive {
+		return fmt.Errorf("no active transaction")
+	}
+
+	if db.MVCCManager == nil {
+		return fmt.Errorf("MVCC not enabled")
+	}
+
+	err := db.MVCCManager.AbortTransaction(conn.MVCCTxn)
+	conn.MVCCTxn = nil
+	return err
+}
+
+// GetActiveTransaction returns the active transaction for a connection
+func (db *Database) GetActiveTransaction(conn *Connection) *MVCCTransaction {
+	return conn.MVCCTxn
+}
+
+// HasActiveTransaction checks if a connection has an active transaction
+func (db *Database) HasActiveTransaction(conn *Connection) bool {
+	return conn.MVCCTxn != nil && conn.MVCCTxn.State == TxActive
 }
 
 // HasAggregates checks if query plan contains aggregate functions
