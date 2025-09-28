@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	"fastpostgres/pkg/engine"
+	"fastpostgres/pkg/query/simd"
 )
 
 // VectorizedEngine executes queries using vectorized operations.
@@ -253,7 +254,29 @@ func (ve *VectorizedEngine) applyInt64Filter(col *engine.Column, filter *engine.
 	if filterValue, ok := filter.Value.(int64); ok {
 		data := (*[]int64)(col.Data)
 
-		// Vectorized comparison - process multiple values at once
+		if ve.simdEnabled && (endRow-startRow) >= 64 {
+			slice := (*data)[startRow:endRow]
+			var op simd.CompareOp
+			switch filter.Operator {
+			case engine.OpEqual:
+				op = simd.OpEqual
+			case engine.OpNotEqual:
+				op = simd.OpNotEqual
+			case engine.OpLess:
+				op = simd.OpLess
+			case engine.OpLessEqual:
+				op = simd.OpLessEqual
+			case engine.OpGreater:
+				op = simd.OpGreater
+			case engine.OpGreaterEqual:
+				op = simd.OpGreaterEqual
+			default:
+				op = simd.OpEqual
+			}
+			simd.FilterInt64WithSelectionAVX512(slice, filterValue, op, selection, selection)
+			return
+		}
+
 		for i := startRow; i < endRow; i++ {
 			if !selection[i-startRow] {
 				continue
@@ -289,6 +312,12 @@ func (ve *VectorizedEngine) applyInt64Filter(col *engine.Column, filter *engine.
 func (ve *VectorizedEngine) applyStringFilter(col *engine.Column, filter *engine.FilterExpression, selection []bool, startRow, endRow int) {
 	if filterValue, ok := filter.Value.(string); ok {
 		data := (*[]string)(col.Data)
+
+		if ve.simdEnabled && filter.Operator == engine.OpEqual && (endRow-startRow) >= 32 {
+			slice := (*data)[startRow:endRow]
+			simd.CompareStringsAVX2(slice, filterValue, selection)
+			return
+		}
 
 		for i := startRow; i < endRow; i++ {
 			if !selection[i-startRow] {
@@ -399,25 +428,7 @@ func (ve *VectorizedEngine) ExecuteAggregateQuery(plan *engine.QueryPlan, table 
 
 // SIMD-accelerated operations (architecture-specific)
 func (ops *IntVectorOps) VectorizedSum(data []int64) int64 {
-	// In a real implementation, this would use SIMD instructions
-	// like AVX-512 for processing 8 int64s at once
-	var sum int64
-
-	// Process 8 elements at a time (AVX-512 width for int64)
-	i := 0
-	for i+7 < len(data) {
-		// This would be a single AVX-512 instruction in assembly
-		sum += data[i] + data[i+1] + data[i+2] + data[i+3] +
-		       data[i+4] + data[i+5] + data[i+6] + data[i+7]
-		i += 8
-	}
-
-	// Handle remaining elements
-	for ; i < len(data); i++ {
-		sum += data[i]
-	}
-
-	return sum
+	return simd.SumInt64AVX512(data)
 }
 
 func (ops *IntVectorOps) VectorizedCompare(left, right []int64, result []bool, op engine.FilterOperator) {
@@ -670,64 +681,12 @@ func (ve *VectorizedEngine) vectorizedMax(table *engine.Table, columnName string
 
 // VectorizedMin performs SIMD-accelerated min operation
 func (ops *IntVectorOps) VectorizedMin(data []int64) int64 {
-	if len(data) == 0 {
-		return 0
-	}
-
-	min := data[0]
-
-	// Process 8 elements at a time (AVX-512 width for int64)
-	i := 1
-	for i+7 < len(data) {
-		// This would be a single AVX-512 instruction in assembly
-		v := [8]int64{data[i], data[i+1], data[i+2], data[i+3], data[i+4], data[i+5], data[i+6], data[i+7]}
-		for _, val := range v {
-			if val < min {
-				min = val
-			}
-		}
-		i += 8
-	}
-
-	// Handle remaining elements
-	for ; i < len(data); i++ {
-		if data[i] < min {
-			min = data[i]
-		}
-	}
-
-	return min
+	return simd.MinInt64AVX512(data)
 }
 
 // VectorizedMax performs SIMD-accelerated max operation
 func (ops *IntVectorOps) VectorizedMax(data []int64) int64 {
-	if len(data) == 0 {
-		return 0
-	}
-
-	max := data[0]
-
-	// Process 8 elements at a time (AVX-512 width for int64)
-	i := 1
-	for i+7 < len(data) {
-		// This would be a single AVX-512 instruction in assembly
-		v := [8]int64{data[i], data[i+1], data[i+2], data[i+3], data[i+4], data[i+5], data[i+6], data[i+7]}
-		for _, val := range v {
-			if val > max {
-				max = val
-			}
-		}
-		i += 8
-	}
-
-	// Handle remaining elements
-	for ; i < len(data); i++ {
-		if data[i] > max {
-			max = data[i]
-		}
-	}
-
-	return max
+	return simd.MaxInt64AVX512(data)
 }
 
 // executeGroupByAggregation handles aggregation queries with GROUP BY clause
