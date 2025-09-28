@@ -81,15 +81,32 @@ const SSLRequestCode = 80877103
 // PostgresConnection represents a single client connection to the server.
 // It maintains connection state, buffers, and authentication information.
 type PostgresConnection struct {
-	conn     net.Conn
-	reader   *bufio.Reader
-	writer   *bufio.Writer
-	db       *engine.Database
-	connInfo *ConnectionInfo
-	authenticated bool
+	conn              net.Conn
+	reader            *bufio.Reader
+	writer            *bufio.Writer
+	db                *engine.Database
+	connInfo          *ConnectionInfo
+	authenticated     bool
 	transactionStatus byte
-	processID int32
-	secretKey int32
+	processID         int32
+	secretKey         int32
+	preparedStmts     map[string]*PreparedStatement
+	portals           map[string]*Portal
+}
+
+// PreparedStatement represents a parsed SQL statement with parameters
+type PreparedStatement struct {
+	Name       string
+	Query      string
+	Plan       *engine.QueryPlan
+	ParamTypes []int32
+}
+
+// Portal represents a bound prepared statement ready for execution
+type Portal struct {
+	Name      string
+	Statement *PreparedStatement
+	Params    []interface{}
 }
 
 // ConnectionInfo holds metadata about a client connection.
@@ -152,15 +169,17 @@ func (ps *PostgresServer) handleConnection(conn net.Conn) {
 	log.Printf("New connection from %s", conn.RemoteAddr())
 
 	pgConn := &PostgresConnection{
-		conn:     conn,
-		reader:   bufio.NewReader(conn),
-		writer:   bufio.NewWriter(conn),
-		db:       ps.db,
-		connInfo: &ConnectionInfo{Options: make(map[string]string)},
-		authenticated: false,
+		conn:              conn,
+		reader:            bufio.NewReader(conn),
+		writer:            bufio.NewWriter(conn),
+		db:                ps.db,
+		connInfo:          &ConnectionInfo{Options: make(map[string]string)},
+		authenticated:     false,
 		transactionStatus: TransIdle,
-		processID: 12345, // Static for now
-		secretKey: 67890, // Static for now
+		processID:         12345, // Static for now
+		secretKey:         67890, // Static for now
+		preparedStmts:     make(map[string]*PreparedStatement),
+		portals:           make(map[string]*Portal),
 	}
 
 	// Set connection timeout
@@ -354,10 +373,22 @@ func (ps *PostgresServer) handleMessage(pgConn *PostgresConnection, msgType byte
 	switch msgType {
 	case MsgQuery:
 		return ps.handleQuery(pgConn, string(data[:len(data)-1])) // Remove null terminator
+	case MsgParse:
+		return ps.handleParse(pgConn, data)
+	case MsgBind:
+		return ps.handleBind(pgConn, data)
+	case MsgExecute:
+		return ps.handleExecute(pgConn, data)
+	case MsgDescribe:
+		return ps.handleDescribe(pgConn, data)
+	case MsgSync:
+		return ps.sendReadyForQuery(pgConn, TransIdle)
+	case MsgClose:
+		return ps.handleClose(pgConn, data)
 	case MsgTerminate:
 		return fmt.Errorf("terminate")
 	default:
-		log.Printf("Unhandled message type: %c", msgType)
+		log.Printf("Unhandled message type: %c (0x%02x)", msgType, msgType)
 		return nil
 	}
 }
@@ -367,9 +398,12 @@ func (ps *PostgresServer) handleQuery(pgConn *PostgresConnection, sql string) er
 	log.Printf("Executing query: %s", sql)
 
 	sql = strings.TrimSpace(sql)
-	if sql == "" {
+	if sql == "" || sql == ";" {
 		return ps.sendEmptyQueryResponse(pgConn)
 	}
+
+	// Remove trailing semicolon
+	sql = strings.TrimSuffix(sql, ";")
 
 	// Parse the SQL query
 	plan, err := ps.parser.Parse(sql)
