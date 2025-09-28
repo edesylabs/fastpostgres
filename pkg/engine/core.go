@@ -3,6 +3,9 @@
 package engine
 
 import (
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,6 +43,7 @@ type Table struct {
 	Columns   []*Column
 	RowCount  uint64
 	Indexes   map[string]*Index
+	Database  *Database  // Reference to parent database for WAL access
 	mu        sync.RWMutex
 }
 
@@ -406,9 +410,20 @@ func (c *Column) GetString(index uint64) (string, bool) {
 // Table operations
 func NewTable(name string) *Table {
 	return &Table{
-		Name:    name,
-		Columns: make([]*Column, 0),
-		Indexes: make(map[string]*Index),
+		Name:     name,
+		Columns:  make([]*Column, 0),
+		Indexes:  make(map[string]*Index),
+		Database: nil, // Set when table is added to database
+	}
+}
+
+// NewTableWithDB creates a new table with database reference
+func NewTableWithDB(name string, db *Database) *Table {
+	return &Table{
+		Name:     name,
+		Columns:  make([]*Column, 0),
+		Indexes:  make(map[string]*Index),
+		Database: db,
 	}
 }
 
@@ -434,6 +449,13 @@ func (t *Table) GetColumn(name string) *Column {
 func (t *Table) InsertRow(values map[string]interface{}) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Write WAL record before applying changes
+	if t.Database != nil && t.Database.WAL != nil {
+		if err := t.writeInsertWAL(values); err != nil {
+			return fmt.Errorf("failed to write WAL record: %w", err)
+		}
+	}
 
 	for _, col := range t.Columns {
 		value, exists := values[col.Name]
@@ -465,6 +487,135 @@ func (t *Table) InsertRow(values map[string]interface{}) error {
 
 	atomic.AddUint64(&t.RowCount, 1)
 	return nil
+}
+
+// writeInsertWAL writes an INSERT operation to WAL
+func (t *Table) writeInsertWAL(values map[string]interface{}) error {
+	// Convert values to JSON for storage
+	data, err := json.Marshal(values)
+	if err != nil {
+		return fmt.Errorf("failed to serialize row data: %w", err)
+	}
+
+	// Use reflection to call WriteRecord on the storage.WAL interface
+	walInterface := t.Database.WAL
+	if walInterface == nil {
+		return nil // WAL not initialized
+	}
+
+	// Create storage.WALRecord using reflection to avoid circular imports
+	record := map[string]interface{}{
+		"Type":      uint8(1), // WALRecordInsert = 1 (from storage package)
+		"TableName": t.Name,
+		"Data":      data,
+	}
+
+	// Call WriteRecord via reflection
+	return t.callWALWriteRecord(walInterface, record)
+}
+
+// callWALWriteRecord calls WriteRecord on WAL using reflection
+func (t *Table) callWALWriteRecord(walInterface interface{}, record map[string]interface{}) error {
+	// Get the WriteRecord method
+	val := reflect.ValueOf(walInterface)
+	method := val.MethodByName("WriteRecord")
+	if !method.IsValid() {
+		return fmt.Errorf("WriteRecord method not found on WAL interface")
+	}
+
+	// Create a WALRecord-like struct using reflection
+	walRecordType := method.Type().In(0).Elem() // Get the type of the parameter (dereferenced)
+
+	// Create new instance
+	walRecord := reflect.New(walRecordType).Elem()
+
+	// Set fields with proper type conversion
+	for fieldName, value := range record {
+		field := walRecord.FieldByName(fieldName)
+		if field.IsValid() && field.CanSet() {
+			if fieldName == "Type" {
+				// For Type field, we need to convert to the proper enum type
+				typeField := field.Type()
+				typeValue := reflect.ValueOf(value).Convert(typeField)
+				field.Set(typeValue)
+			} else {
+				field.Set(reflect.ValueOf(value))
+			}
+		}
+	}
+
+	// Call WriteRecord
+	results := method.Call([]reflect.Value{walRecord.Addr()})
+
+	// Check for error
+	if len(results) > 0 && !results[0].IsNil() {
+		return results[0].Interface().(error)
+	}
+
+	return nil
+}
+
+// WriteCreateTableWAL writes a CREATE TABLE operation to WAL
+func (t *Table) WriteCreateTableWAL() error {
+	if t.Database == nil || t.Database.WAL == nil {
+		return nil // WAL not enabled
+	}
+
+	// Create table schema for WAL
+	schema := TableSchema{
+		Name:    t.Name,
+		Columns: make([]ColumnDef, len(t.Columns)),
+	}
+
+	for i, col := range t.Columns {
+		schema.Columns[i] = ColumnDef{
+			Name: col.Name,
+			Type: col.Type,
+		}
+	}
+
+	// Serialize schema
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return fmt.Errorf("failed to serialize table schema: %w", err)
+	}
+
+	// Create storage.WALRecord using reflection
+	record := map[string]interface{}{
+		"Type":      uint8(4), // WALRecordCreateTable = 4 (from storage package)
+		"TableName": t.Name,
+		"Data":      data,
+	}
+
+	// Call WriteRecord via reflection
+	return t.callWALWriteRecord(t.Database.WAL, record)
+}
+
+// WALWriter interface for writing WAL records
+type WALWriter interface {
+	WriteRecord(record *WALRecord) error
+}
+
+// WALRecord represents a WAL record (mirrored from storage package)
+type WALRecord struct {
+	LSN       uint64
+	Type      uint8
+	TableName string
+	Data      []byte
+	Timestamp time.Time
+	CRC       uint32
+}
+
+// TableSchema represents table structure for WAL
+type TableSchema struct {
+	Name    string
+	Columns []ColumnDef
+}
+
+// ColumnDef represents a column definition
+type ColumnDef struct {
+	Name string
+	Type DataType
 }
 
 // HasAggregates checks if query plan contains aggregate functions

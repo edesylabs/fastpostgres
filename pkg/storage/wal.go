@@ -57,7 +57,7 @@ const (
 
 const (
 	defaultSegmentSize = 16 * 1024 * 1024 // 16MB per segment
-	walRecordHeader    = 28                 // Size of fixed header
+	walRecordHeader    = 29                 // Size of fixed header: 8+1+8+4+4+4 = 29 bytes
 )
 
 // NewWAL creates a new WAL manager.
